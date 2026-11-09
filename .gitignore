@@ -1,0 +1,6 @@
+.build/
+dist/
+vendor/
+*.xcodeproj
+.DS_Store
+*.profraw

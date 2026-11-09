@@ -1,0 +1,82 @@
+diff --git a/build.zig b/build.zig
+index 85a91fb..c0779c1 100644
+--- a/build.zig
++++ b/build.zig
+@@ -225,7 +225,12 @@ pub fn build(b: *std.Build) !void {
+ 
+         // We shouldn't have this guard but we don't currently
+         // build on macOS this way ironically so we need to fix that.
+-        if (!config.target.result.os.tag.isDarwin()) {
++        if (config.target.result.os.tag.isDarwin()) {
++            // corral: plain static lib + resources, no xcframework/xcodebuild
++            b.getInstallStep().dependOn(&b.addInstallLibFile(lib_static.output, "libghostty.a").step);
++            b.getInstallStep().dependOn(&b.addInstallHeaderFile(b.path("include/ghostty.h"), "ghostty.h").step);
++            resources.install();
++        } else {
+             lib_shared.installHeader(); // Only need one header
+             if (config.target.result.os.tag == .windows) {
+                 lib_shared.install("ghostty-internal.dll");
+diff --git a/src/apprt/embedded.zig b/src/apprt/embedded.zig
+index 697f0a7..e1705db 100644
+--- a/src/apprt/embedded.zig
++++ b/src/apprt/embedded.zig
+@@ -569,7 +569,7 @@ pub const Surface = struct {
+             const cmd = std.mem.sliceTo(c_command, 0);
+             if (cmd.len > 0) {
+                 config.command = .{ .shell = cmd };
+-                config.@"wait-after-command" = true;
++                // corral: no implicit wait-after-command, the embedder's flag decides
+             }
+         }
+ 
+diff --git a/src/build/SharedDeps.zig b/src/build/SharedDeps.zig
+index 8f4e239..e5fa7af 100644
+--- a/src/build/SharedDeps.zig
++++ b/src/build/SharedDeps.zig
+@@ -500,10 +500,9 @@ pub fn add(
+     if (step.rootModuleTarget().os.tag.isDarwin()) {
+         try @import("apple_sdk").addPaths(b, step);
+ 
+-        const metallib = self.metallib.?;
+-        metallib.output.addStepDependencies(&step.step);
+-        step.root_module.addAnonymousImport("ghostty_metallib", .{
+-            .root_source_file = metallib.output,
++        // corral: no Xcode metal toolchain; embed shader source, compile at runtime
++        step.root_module.addAnonymousImport("ghostty_metal_source", .{
++            .root_source_file = b.path("src/renderer/shaders/shaders.metal"),
+         });
+     }
+ 
+diff --git a/src/renderer/metal/shaders.zig b/src/renderer/metal/shaders.zig
+index b14068f..8354d90 100644
+--- a/src/renderer/metal/shaders.zig
++++ b/src/renderer/metal/shaders.zig
+@@ -336,21 +336,18 @@ pub const BgImage = extern struct {
+ fn initLibrary(device: objc.Object) !objc.Object {
+     const start: std.Io.Timestamp = .now(global.io(), .awake);
+ 
+-    const data = try macos.dispatch.Data.create(
+-        @embedFile("ghostty_metallib"),
+-        macos.dispatch.queue.getMain(),
+-        macos.dispatch.Data.DESTRUCTOR_DEFAULT,
++    const source = try macos.foundation.String.createWithBytes(
++        @embedFile("ghostty_metal_source"),
++        .utf8,
++        false,
+     );
+-    defer data.release();
++    defer source.release();
+ 
+     var err: ?*anyopaque = null;
+     const library = device.msgSend(
+         objc.Object,
+-        objc.sel("newLibraryWithData:error:"),
+-        .{
+-            data,
+-            &err,
+-        },
++        objc.sel("newLibraryWithSource:options:error:"),
++        .{ source, @as(?*anyopaque, null), &err },
+     );
+     try checkError(err);
+ 
