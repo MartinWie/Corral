@@ -702,6 +702,7 @@ struct SearchPanelTests {
         #expect(rows[1]?.hovered == false && rows[0]?.hovered == true)
         p.table.setHovered(7)
         #expect(p.table.hoveredRow == -1)
+        p.table.pointerInWindow = { NSPoint(x: -100, y: -100) }
         p.table.refreshHover()
         #expect(p.table.hoveredRow == -1)
         let panel = p.window!

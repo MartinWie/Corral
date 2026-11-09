@@ -1145,9 +1145,12 @@ final class SearchResultsTable: NSTableView {
     }
 
     /// After a scroll the pointer sits over a different row without moving.
+    /// The pointer in window coordinates; tests pin it (the real one is wherever the mouse is).
+    var pointerInWindow: (() -> NSPoint)?
+
     func refreshHover() {
         guard let window else { return setHovered(-1) }
-        let p = convert(window.mouseLocationOutsideOfEventStream, from: nil)
+        let p = convert(pointerInWindow?() ?? window.mouseLocationOutsideOfEventStream, from: nil)
         setHovered(visibleRect.contains(p) ? row(at: p) : -1)
     }
 }
