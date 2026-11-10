@@ -71,7 +71,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     /// A reveal scrolls itself; selection sync must not jump there first.
     private var revealing = false
     static let dragType = NSPasteboard.PasteboardType("dev.corral.sidebar-node")
-    private static let closedLimit = 40
+    static let closedLimit = 40
     private var clockTimer: Timer?
 
     /// Structural diff planner (§4.4); tests substitute fake plans.
@@ -107,7 +107,9 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
 
     deinit {
         clockTimer?.invalidate()
+        settleCheck?.cancel()
         if let flagsMonitor { NSEvent.removeMonitor(flagsMonitor) }
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
     }
 
     override func loadView() {
@@ -212,6 +214,9 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         nc.addObserver(self, selector: #selector(motionChanged), name: .corralMotionChanged, object: nil)
         nc.addObserver(self, selector: #selector(clipBoundsChanged), name: NSView.boundsDidChangeNotification,
                        object: scroll.contentView)
+        nc.addObserver(self, selector: #selector(healIfNeeded), name: NSApplication.didBecomeActiveNotification, object: nil)
+        NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(healIfNeeded),
+                                                          name: NSWorkspace.screensDidWakeNotification, object: nil)
         flagsMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
             MainActor.assumeIsolated { self?.handleFlagsChanged(event) }
             return event
@@ -291,8 +296,9 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         }
     }
 
-    /// Structure path (§4.4): rebuild nodes, then animate a planned diff or fall back to `reloadData`.
-    func reload() {
+    /// Structure path (§4.4): rebuild nodes, then animate a planned diff or fall back to `reloadData`
+    /// (always with `forceFull`).
+    func reload(forceFull: Bool = false) {
         let ws = manager.workspace
         var top = ws.tree.map(build)
         let bg = manager.unattachedBackground
@@ -315,17 +321,20 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         let previous = outline.selectedRow >= 0 ? outline.item(atRow: outline.selectedRow) as? SidebarNode : nil
         syncingSelection = true
         var applied = false
-        if loaded, old == shown {
+        if loaded, !forceFull, old == shown {
             // Same tree (background refreshes, renames, folder directories): cells update in place, so
             // loops keep their phase and hover and in-flight animations survive.
             reconfigureVisibleRows(animated: true)
             applied = true
-        } else if loaded, case .ops(let ops) = planner(old, shown) {
+        } else if loaded, !forceFull, SidebarFX.canAnimate(outline), case .ops(let ops) = planner(old, shown) {
+            // Planned ops only when they animate: AppKit slides rows on every incremental change, and
+            // without a display (asleep, window hidden) the slide never ends. A reload doesn't slide.
             applied = apply(ops, old: old, new: shown)
         }
         if !applied { fullReload() }
         syncingSelection = false
         loaded = true
+        if old != shown { scheduleSettleCheck() }
 
         // Keep a closed-session / background-agent preview selected across list refreshes;
         // explicit selection changes arrive as .selection and resync.
@@ -349,6 +358,8 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         restoring = true
         restoreExpansion(roots)
         restoring = false
+        // Cells were made before the expansion came back: chevrons follow it now.
+        reconfigureVisibleRows(animated: false)
         scroll.contentView.scroll(to: offset)
         scroll.reflectScrolledClipView(scroll.contentView)
         outline.refreshHoverFromMouse()
@@ -399,6 +410,8 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             case .move(let fp, let f, let tp, let t): if !valid(old, fp, f) || !valid(new, tp, t) { return false }
             }
         }
+        let animate = SidebarFX.canAnimate(outline)
+        let full = animate && Motion.full
         for op in ops {
             switch op {
             case .remove(let p, let i):
@@ -410,7 +423,16 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             case .move(let fp, let f, let tp, let t):
                 guard persists(fp), persists(tp) else { return false }
                 switch (live(fp), live(tp)) {
-                case (true, true): moves.append((item(fp), f, item(tp), t))
+                case (true, true):
+                    // moveItem animates whatever the context says, and an animation that can't finish
+                    // (no display) holds the row views off their rows: unless animating, remove + insert.
+                    if full {
+                        moves.append((item(fp), f, item(tp), t))
+                    } else {
+                        removes.append((item(fp), f))
+                        inserts.append((item(tp), t))
+                        arriving(tp, t)
+                    }
                 case (true, false): removes.append((item(fp), f)); later(tp)
                 case (false, true): inserts.append((item(tp), t)); arriving(tp, t); later(fp)
                 case (false, false): later(fp); later(tp)
@@ -418,8 +440,6 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             }
         }
 
-        let animate = SidebarFX.canAnimate(outline)
-        let full = animate && Motion.full
         let insertAnimation: NSTableView.AnimationOptions = full ? [.effectFade, .slideDown] : (animate ? .effectFade : [])
         let removeAnimation: NSTableView.AnimationOptions = full ? [.effectFade, .slideUp] : (animate ? .effectFade : [])
         NSAnimationContext.beginGrouping()
@@ -438,14 +458,14 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         for (fp, f, tp, t) in moves { outline.moveItem(at: f, inParent: fp, to: t, inParent: tp) }
         outline.endUpdates()
         NSAnimationContext.endGrouping()
-        for n in deferred { outline.reloadItem(n, reloadChildren: true) }
+        withoutAnimation { for n in deferred { outline.reloadItem(n, reloadChildren: true) } }
         restoring = true
         // New folders arrive expanded; a visible parent the model has open (e.g. an empty folder that
         // just got its first child) is reopened after its reload.
         restoreExpansion(arrived + deferred.filter { outline.row(forItem: $0) >= 0 })
         restoring = false
 
-        guard outline.numberOfRows == visibleRowCount() else { return false }
+        guard rowsMatchModel() else { return false }
         reconfigureVisibleRows(animated: true)
         if animate {
             for n in arrived {
@@ -457,20 +477,82 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         return true
     }
 
-    /// Rows the outline should show for the current model and expansion state.
-    private func visibleRowCount() -> Int {
-        func count(_ list: [SidebarNode]) -> Int {
-            list.reduce(0) { $0 + 1 + (outline.isItemExpanded($1) ? count($1.children) : 0) }
+    private var settleCheck: DispatchWorkItem?
+    /// Tests shorten it.
+    static var settleDelay = 0.6
+    /// Reloads `healIfNeeded` had to do (tests).
+    private(set) var heals = 0
+
+    /// A row animation cut short by the next update (or stalled while the displays sleep) leaves row
+    /// views between rows, and AppKit keeps them there: seen as closed rows covering the Closed header.
+    /// Once structure updates have been quiet for `settleDelay`, check once and reload if off.
+    func scheduleSettleCheck() {
+        settleCheck?.cancel()
+        let work = DispatchWorkItem { [weak self] in MainActor.assumeIsolated { self?.healIfNeeded() } }
+        settleCheck = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.settleDelay, execute: work)
+    }
+
+    /// Reloads when rows or row views are out of step with the model. Also run when Corral comes back
+    /// to the front and when the displays wake.
+    @objc func healIfNeeded() {
+        guard loaded, !(rowsMatchModel() && rowViewsInPlace()) else { return }
+        // Never under the user's hands: a drag shifts and hides rows on purpose.
+        if NSEvent.pressedMouseButtons != 0 { return scheduleSettleCheck() }
+        NSLog("Corral sidebar: rows out of step with the model, reloading")
+        heals += 1
+        reload(forceFull: true)
+    }
+
+    /// The outline lists exactly the model's nodes in order, folders open or closed as the model has
+    /// them (sections follow the outline's own state).
+    func rowsMatchModel() -> Bool {
+        var row = 0
+        func walk(_ list: [SidebarNode]) -> Bool {
+            for n in list {
+                guard outline.item(atRow: row) as? SidebarNode === n else { return false }
+                row += 1
+                let open = outline.isItemExpanded(n)
+                // Empty folders can't open.
+                if case .folder(let id) = n.kind, !n.children.isEmpty,
+                   open != (manager.workspace.folders[id]?.expanded ?? true) { return false }
+                if open, !walk(n.children) { return false }
+            }
+            return true
         }
-        return count(roots)
+        return walk(roots) && row == outline.numberOfRows
+    }
+
+    /// The row views sit on their rows (mid-animation they don't, so only checked at rest). Holds for
+    /// group rows only because they don't float (`floatsGroupRows = false`).
+    func rowViewsInPlace() -> Bool {
+        var placed = true
+        outline.enumerateAvailableRowViews { rv, r in
+            let rect = outline.rect(ofRow: r)
+            if rv.isHidden || abs(rv.frame.minY - rect.minY) > 1 || abs(rv.frame.height - rect.height) > 1 { placed = false }
+        }
+        return placed
+    }
+
+    /// Outline changes that must not animate.
+    func withoutAnimation(_ body: () -> Void) {
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0
+            ctx.allowsImplicitAnimation = false
+            body()
+        }
     }
 
     private func restoreExpansion(_ list: [SidebarNode]) {
+        withoutAnimation { expand(list) }
+    }
+
+    private func expand(_ list: [SidebarNode]) {
         for n in list {
             switch n.kind {
             case .folder(let id):
                 if manager.workspace.folders[id]?.expanded ?? true { outline.expandItem(n) }
-                restoreExpansion(n.children)
+                expand(n.children)
             case .backgroundHeader:
                 if !UserDefaults.standard.bool(forKey: "sidebar.background.collapsed") { outline.expandItem(n) }
             case .closedHeader:
@@ -891,9 +973,12 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         refreshClock(now: Date())
     }
 
-    /// Ticks are skipped while occluded: catch up as soon as the window shows again.
+    /// Ticks are skipped while occluded: catch up as soon as the window shows again. Row animations
+    /// stall while hidden too, so check the rows once they had time to finish.
     func occlusionChanged(visible: Bool) {
-        if visible { refreshClock(now: Date()) }
+        guard visible else { return }
+        refreshClock(now: Date())
+        scheduleSettleCheck()
     }
 
     /// Re-renders relative times in place (no reload).
@@ -1003,12 +1088,17 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         }
     }
 
-    /// Single click: section headers toggle anywhere on the row (§3.8).
+    /// Single click: section headers toggle anywhere on the row (§3.8). A click on the selected session
+    /// focuses its terminal; on another one the selection change does.
     @objc func rowClicked() { handleClick(row: outline.clickedRow) }
 
     func handleClick(row: Int) {
-        guard row >= 0, let n = outline.item(atRow: row) as? SidebarNode, n.isHeader else { return }
-        toggle(n, animated: true)
+        guard row >= 0, let n = outline.item(atRow: row) as? SidebarNode else { return }
+        switch n.kind {
+        case .backgroundHeader, .closedHeader: toggle(n, animated: true)
+        case .session(let id) where id == manager.workspace.selected: delegate?.sidebarFocusTerminal()
+        default: break
+        }
     }
 
     /// User toggle (M9): animated expand/collapse; `restoreExpansion` never animates.
@@ -1020,10 +1110,12 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
                 ctx.timingFunction = Motion.std
                 if expand { outline.animator().expandItem(n) } else { outline.animator().collapseItem(n) }
             }
-        } else if expand {
-            outline.expandItem(n)
+            scheduleSettleCheck()
         } else {
-            outline.collapseItem(n)
+            // In place it slides the rows below, and without a display that slide never ends: rebuild
+            // in the new state right away instead.
+            withoutAnimation { if expand { outline.expandItem(n) } else { outline.collapseItem(n) } }
+            reload(forceFull: true)
         }
     }
 

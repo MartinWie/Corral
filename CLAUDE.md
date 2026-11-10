@@ -179,6 +179,16 @@ image metadata) or build output. `scripts/leak-scan.py` checks shipped files; ex
   name every turn: no change. Indexes from before the column get it filled once
   (`TranscriptIndexer.backfillAgentNames`, meta flag `agent_names`) before the first refresh, so that
   first sync sees names given earlier.
+- Sidebar rows: AppKit slides row views on every incremental outline change (insert, remove,
+  `moveItem`, expand/collapse), whatever the animation context says, and a slide needs a display to
+  finish. One that stalls (displays asleep, window hidden) or gets cut short leaves row views between
+  rows until `reloadData`, seen as closed rows covering the Closed header. So planned ops run only
+  when `SidebarFX.canAnimate` (else `reload` falls back to a full reload, and a non-animated toggle
+  rebuilds); `Motion.displaysAsleep` turns animations off while the displays sleep; and
+  `healIfNeeded` (rows vs model, row views vs their rows) runs once structure updates settle
+  (`scheduleSettleCheck`), on activation, on display wake and when the window shows again. Test
+  windows are never on screen, so they stall animations like a sleeping display:
+  `SidebarStressTests` relies on that.
 - Settings rows: a wrapping caption must get its width from constraints (row/page), never from its
   text, and never set `preferredMaxLayoutWidth` during layout (the window then loops on constraint
   passes and AppKit throws). Scroll views must start below the transparent titlebar (else macOS 26

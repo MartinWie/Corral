@@ -16,20 +16,29 @@ enum Motion {
     static let out = CAMediaTimingFunction(controlPoints: 0.16, 1, 0.3, 1)
     static let exit = CAMediaTimingFunction(controlPoints: 0.4, 0, 1, 1)
 
-    private static var observer: NSObjectProtocol?
+    private static var observers: [NSObjectProtocol] = []
 
-    /// Call once at startup: tracks Reduce Motion / Increase Contrast changes.
+    /// While the displays sleep nothing animates: Core Animation stalls and completions never come,
+    /// which leaves animated table updates half done.
+    static var displaysAsleep = false
+
+    /// Call once at startup: tracks Reduce Motion / Increase Contrast changes and display sleep.
     static func observeAccessibility() {
-        guard observer == nil else { return }
-        observer = NSWorkspace.shared.notificationCenter.addObserver(
-            forName: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil, queue: .main
-        ) { _ in
-            do {
+        guard observers.isEmpty else { return }
+        let nc = NSWorkspace.shared.notificationCenter
+        observers = [
+            nc.addObserver(forName: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil, queue: .main) { _ in
                 reduced = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
                 NotificationCenter.default.post(name: .corralMotionChanged, object: nil)
                 Theme.recompute()
-            }
-        }
+            },
+            nc.addObserver(forName: NSWorkspace.screensDidSleepNotification, object: nil, queue: .main) { _ in
+                displaysAsleep = true
+            },
+            nc.addObserver(forName: NSWorkspace.screensDidWakeNotification, object: nil, queue: .main) { _ in
+                displaysAsleep = false
+            },
+        ]
     }
 
     /// For tests: pretend Reduce Motion is on/off.
@@ -42,7 +51,7 @@ enum Motion {
     static var assumeVisible = false
 
     static func shouldAnimate(_ v: NSView) -> Bool {
-        guard enabled, let window = v.window, !v.isHiddenOrHasHiddenAncestor else { return false }
+        guard enabled, !displaysAsleep, let window = v.window, !v.isHiddenOrHasHiddenAncestor else { return false }
         return assumeVisible || window.occlusionState.contains(.visible)
     }
 

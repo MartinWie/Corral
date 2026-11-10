@@ -419,6 +419,10 @@ struct SidebarTests {
     @Test func plannedOpsAnimateWithoutReload() {
         let (f, s, w) = makeWindowed()
         defer { f.cleanup() }
+        // Planned ops run only where they can animate.
+        let visible = Motion.assumeVisible
+        Motion.assumeVisible = true
+        defer { Motion.assumeVisible = visible }
         let folder = f.manager.newFolder(name: "F")
         f.manager.newSession(agent: .shell, cwd: f.dir.path, folder: .some(folder))
         f.manager.newSession(agent: .shell, cwd: f.dir.path, folder: .some(nil))
@@ -461,6 +465,10 @@ struct SidebarTests {
     @Test func singleMoveUsesMoveItem() {
         let (f, s, w) = makeWindowed()
         defer { f.cleanup() }
+        // Planned ops run only where they can animate.
+        let visible = Motion.assumeVisible
+        Motion.assumeVisible = true
+        defer { Motion.assumeVisible = visible }
         let a = f.manager.newFolder(name: "A")
         let b = f.manager.newFolder(name: "B")
         f.manager.newSession(agent: .shell, cwd: f.dir.path, folder: .some(a))
@@ -511,6 +519,10 @@ struct SidebarTests {
     @Test func wrongPlansFallBackToReload() {
         let (f, s, w) = makeWindowed()
         defer { f.cleanup() }
+        // Planned ops run only where they can animate.
+        let visible = Motion.assumeVisible
+        Motion.assumeVisible = true
+        defer { Motion.assumeVisible = visible }
         f.manager.newSession(agent: .shell, cwd: f.dir.path)
         settle(w)
         // An empty plan for a real insert leaves the outline short: detected, full reload.
@@ -608,7 +620,7 @@ struct SidebarTests {
         }
     }
 
-    @Test func headerClicksAndChevronsToggle() {
+    @Test func headerClicksAndChevronsToggle() throws {
         let defaults = UserDefaults.standard
         let saved = defaults.object(forKey: "sidebar.closed.expanded")
         defer { defaults.set(saved, forKey: "sidebar.closed.expanded") }
@@ -623,6 +635,7 @@ struct SidebarTests {
         let header = s.node(.closedHeader)
         #expect(!s.outline.isItemExpanded(header))
         s.handleClick(row: row(s, .closedHeader))
+        settle(w)  // without animation a toggle rebuilds the rows; cells come with the next layout
         #expect(s.outline.isItemExpanded(header))
         #expect(defaults.bool(forKey: "sidebar.closed.expanded"))
         #expect(cell(s, .closedHeader, as: SectionHeaderView.self)?.chevron.expanded == true)
@@ -634,9 +647,28 @@ struct SidebarTests {
         s.handleClick(row: -1)
         #expect(s.outline.isItemExpanded(s.node(.folder(folder))))
 
+        // A click on the selected session puts the keyboard in its terminal (no selection change does).
+        final class Focus: SidebarDelegate {
+            var count = 0
+            func sidebarShowClosed(_ id: UUID) {}
+            func sidebarShowBackground(_ agent: BackgroundAgent) {}
+            func sidebarFocusTerminal() { count += 1 }
+        }
+        let spy = Focus()
+        s.delegate = spy
+        f.manager.newSession(agent: .shell, cwd: f.dir.path)
+        settle(w)
+        let selected = try #require(f.manager.workspace.selected)
+        s.handleClick(row: row(s, .session(selected)))
+        #expect(spy.count == 1)
+        let other = try #require(f.manager.workspace.openSessionsInOrder.first { $0 != selected })
+        s.handleClick(row: row(s, .session(other)))
+        #expect(spy.count == 1)
+
         let fc = cell(s, .folder(folder), as: FolderRowView.self)!
         #expect(fc.disclosure.chevron.expanded)
         s.disclosureClicked(fc.disclosure)
+        settle(w)
         #expect(!s.outline.isItemExpanded(s.node(.folder(folder))))
         #expect(f.manager.workspace.folders[folder]?.expanded == false)
         #expect(cell(s, .folder(folder), as: FolderRowView.self)?.disclosure.chevron.expanded == false)
@@ -669,6 +701,10 @@ struct SidebarTests {
     @Test func unchangedTreeUpdatesInPlace() {
         let (f, s, w) = makeWindowed()
         defer { f.cleanup() }
+        // Planned ops run only where they can animate.
+        let visible = Motion.assumeVisible
+        Motion.assumeVisible = true
+        defer { Motion.assumeVisible = visible }
         f.manager.newSession(agent: .shell, cwd: f.dir.path)
         let id = f.selected!
         f.manager.applyBackground([BackgroundAgent(id: "j1", sessionId: "s", name: "Job", cwd: "/", state: "working")])
@@ -697,6 +733,10 @@ struct SidebarTests {
     @Test func plannedOpsDropStaleHover() {
         let (f, s, w) = makeWindowed()
         defer { f.cleanup() }
+        // Planned ops run only where they can animate.
+        let visible = Motion.assumeVisible
+        Motion.assumeVisible = true
+        defer { Motion.assumeVisible = visible }
         let folder = f.manager.newFolder(name: "F")
         f.manager.newSession(agent: .shell, cwd: f.dir.path, folder: .some(folder))
         let inner = f.selected!
