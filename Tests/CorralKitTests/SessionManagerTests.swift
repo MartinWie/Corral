@@ -12,7 +12,11 @@ struct SessionManagerTests {
         f.manager.newSession(agent: .claude, cwd: f.dir.path)
         let id = try! #require(f.selected)
         let t = try! #require(f.terminal(id))
-        #expect(t.launch.agentInput == "claude")
+        // Claude starts under an id Corral picks, so it can resume without the status hooks.
+        let sid = try! #require(f.manager.workspace.sessions[id]?.agentSessionId)
+        #expect(t.launch.agentInput == "claude --session-id \(sid)")
+        #expect(f.manager.workspace.sessions[id]?.agentCwd == f.dir.path)
+        #expect(f.manager.workspace.sessions[id]?.restoreInput == "claude --resume \(sid)")
         #expect(t.launch.cwd == f.dir.path)
         #expect(t.launch.env["CORRAL_SOCKET"] == f.env.socketPath)
         #expect(t.launch.env["CORRAL_HOOK"] == "/bin/true")
@@ -43,7 +47,7 @@ struct SessionManagerTests {
     @Test func closeIndexesAgentScrollbackAndSelectsNeighbor() async throws {
         let f = Fixture(start: true)
         defer { f.cleanup() }
-        f.manager.newSession(agent: .claude, cwd: f.dir.path)
+        f.manager.newSession(agent: .opencode, cwd: f.dir.path)
         let a = f.selected!
         f.terminal(a)?.text = "$ ./gradlew test\nBUILD FAILED uniquewordxyz\n"
         f.manager.newSession(agent: .shell, cwd: f.dir.path)
@@ -57,6 +61,56 @@ struct SessionManagerTests {
         f.manager.index.queue.sync {}
         let hits = try f.manager.index.readQueue.sync { try f.manager.index.searchSync("uniquewordxyz") }
         #expect(hits.first?.corralSessionId == a)
+    }
+
+    /// A restored Claude session resumes its conversation; one that never wrote it (opened, nothing typed)
+    /// starts fresh under the same id instead of printing "No conversation found".
+    @Test func relaunchResumesOrStartsFreshUnderTheSameId() throws {
+        let f = Fixture()
+        defer { f.cleanup() }
+        let projects = f.env.roots.claudeProjects.appendingPathComponent("-repo")
+        try FileManager.default.createDirectory(at: projects, withIntermediateDirectories: true)
+        var record = SessionRecord(cwd: f.dir.path, agent: .claude, agentSessionId: "s-1")
+        #expect(f.manager.relaunch(record, input: record.restoreInput) == ("claude --session-id s-1", false))
+        try Data().write(to: projects.appendingPathComponent("s-1.jsonl"))
+        #expect(f.manager.relaunch(record, input: record.restoreInput) == ("claude --resume s-1", true))
+        // Not running when Corral quit: a plain shell, as before.
+        record.agentRunning = false
+        #expect(f.manager.relaunch(record, input: record.restoreInput) == (nil, false))
+        // Others pick their own ids: their resume command stays.
+        let pi = SessionRecord(cwd: f.dir.path, agent: .pi, agentSessionId: "p-1")
+        #expect(f.manager.relaunch(pi, input: pi.restoreInput) == ("pi --session p-1", true))
+    }
+
+    /// Sessions saved without an id (started before the hooks) get their conversation back by title.
+    @Test func idlessClaudeSessionsRecoverTheirConversationByTitle() throws {
+        // Saved by an earlier run, as a relaunch loads it.
+        var saved = Workspace()
+        func add(_ title: String, sid: String? = nil, agent: AgentKind = .claude) -> UUID {
+            var r = SessionRecord(cwd: "/repo", agent: agent, title: title, agentSessionId: sid)
+            r.agentRunning = false
+            saved.addSession(r)
+            return r.id
+        }
+        let hausbau = add("Hausbau Plan"), twin = add("Hausbau Plan"), git = add("Git"), unknown = add("Nothing like it")
+        let taken = add("Taken"), holder = add("Other", sid: "held"), shell = add("Hausbau Plan", agent: .shell)
+        let f = Fixture { try? $0.store.save(saved) }
+        defer { f.cleanup() }
+        let index = f.manager.index
+        try index.open()
+        try index.queue.sync {
+            let db = try #require(index.db)
+            for (sid, title) in [("abc", "Hausbau Plan"), ("g1", "Git"), ("g2", "Git"), ("held", "Taken")] {
+                try SearchIndex.upsertSession(db: db, key: "claude:\(sid)", agent: .claude, sessionId: sid, cwd: "/w",
+                                              custom: nil, ai: title, firstPrompt: nil, created: 1, updated: 2)
+            }
+        }
+        f.manager.recoverSessionIds()
+        let r = try #require(f.manager.workspace.sessions[hausbau])
+        #expect(r.agentSessionId == "abc" && r.agentCwd == "/w" && r.restoreInput == "claude --resume abc")
+        // One conversation, one session; ambiguous titles, unknown ones, held ids and shells stay as they are.
+        for id in [twin, git, unknown, taken, shell] { #expect(f.manager.workspace.sessions[id]?.agentSessionId == nil) }
+        #expect(f.manager.workspace.sessions[holder]?.agentSessionId == "held")
     }
 
     @Test func closingLastSessionClearsSelection() {

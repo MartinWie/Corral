@@ -8,6 +8,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificat
     private(set) var terminals: TerminalFactory!
     private(set) var manager: SessionManager!
     private(set) var main: MainWindowController!
+    /// The main menu `launch` installed.
+    private(set) var mainMenu: NSMenu?
     private(set) lazy var settings = SettingsWindowController(manager: manager, shortcuts: shortcuts, updater: updater)
     /// The user's shortcuts over the menu's built-in ones.
     let shortcuts: ShortcutStore
@@ -41,7 +43,22 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificat
         }
     }
 
+    /// Another Corral on the same support folder (a second copy, e.g. opened from the DMG): both would
+    /// write state.json and bind the hook socket. Returns how to bring that one forward.
+    var otherInstance: () -> (() -> Void)? = {
+        guard ProcessInfo.processInfo.environment["CORRAL_SUPPORT_DIR"] == nil, let id = Bundle.main.bundleIdentifier,
+              let other = NSRunningApplication.runningApplications(withBundleIdentifier: id)
+                  .first(where: { $0 != NSRunningApplication.current }) else { return nil }
+        return { other.activate() }
+    }
+    var quit: () -> Void = { NSApp.terminate(nil) }
+
     public func applicationDidFinishLaunching(_ notification: Notification) {
+        if benchOutput == nil, let activateOther = otherInstance() {
+            activateOther()
+            quit()
+            return
+        }
         launch()
     }
 
@@ -65,6 +82,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificat
         manager = SessionManager(terminals: terminals, env: benchOutput == nil ? makeEnvironment() : BenchRunner.environment())
         main = MainWindowController(manager: manager)
         NSApp.mainMenu = menu
+        mainMenu = menu
+        showInstalledAgents(in: menu)
+        manager.observe { [weak self, weak menu] change in
+            if case .integrations = change, let self, let menu { self.showInstalledAgents(in: menu) }
+        }
         if manager.env.notifications {
             UNUserNotificationCenter.current().delegate = self
             UNUserNotificationCenter.current().setNotificationCategories(Notifier.categories)
@@ -86,13 +108,37 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificat
         NSApp.activate()
     }
 
+    /// An agent installed or removed while Corral was in the background shows up in the menus.
+    public func applicationDidBecomeActive(_ notification: Notification) {
+        manager?.refreshInstalledAgents()
+    }
+
+    /// New-session items only for installed agents. They stay in the menu (hidden), so a custom
+    /// shortcut for one survives until the agent is installed. Runs after `ShortcutStore.register`,
+    /// which leaves out items hidden at that point: Settings › Shortcuts keeps listing these, greyed.
+    func showInstalledAgents(in menu: NSMenu) {
+        let installed = manager?.installedAgents ?? Set(AgentKind.allCases)
+        for item in menu.items.flatMap({ $0.submenu?.items ?? [] }) {
+            if let agent = AgentKind.startedBy(item.action) { item.isHidden = !installed.contains(agent) }
+        }
+    }
+
+    /// The window in front (tests pin it).
+    var keyWindow: () -> NSWindow? = { NSApp.keyWindow }
+
+    /// ⌘W while Settings is in front: the main window isn't in the responder chain then, so Close
+    /// Session lands here (see `FrontWindow`).
+    @objc(closeSession:) func closeFrontWindow(_ sender: Any?) {
+        if !FrontWindow.close(key: keyWindow(), main: main?.window) { NSSound.beep() }
+    }
+
     public func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         main.showWindow(nil)
         return true
     }
 
     public func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard bench == nil else { return .terminateNow }
+        guard bench == nil, let manager else { return .terminateNow }
         let busy = manager.live.values.filter { $0.status.activity == .working || $0.status.activity == .needsInput }.count
         guard busy > 0 else { return .terminateNow }
         let alert = NSAlert()
@@ -146,10 +192,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificat
         let missing = Set(manager.missingIntegrations)
         let status = Integrations.Status(claude: !missing.contains(.claude), opencode: !missing.contains(.opencode),
                                          pi: !missing.contains(.pi))
-        var plan: [String] = []
-        if !status.claude { plan.append("• Claude Code: add hooks to \(RelativeTime.abbreviatePath(paths.claudeSettings.path)) (backup kept)") }
-        if !status.opencode { plan.append("• OpenCode: plugin \(RelativeTime.abbreviatePath(paths.opencodePluginDir.appendingPathComponent("corral.js").path))") }
-        if !status.pi { plan.append("• PI: extension \(RelativeTime.abbreviatePath(paths.piExtensionDir.appendingPathComponent("corral.ts").path))") }
+        let plan = [AgentKind.claude, .opencode, .pi].filter(missing.contains)
         guard !plan.isEmpty else {
             let done = NSAlert()
             done.messageText = "All agent integrations are installed."
@@ -157,10 +200,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificat
             return
         }
         let alert = NSAlert()
-        alert.messageText = "Install agent integrations?"
-        alert.informativeText = plan.joined(separator: "\n")
-            + "\n\nThey report working / needs input / done to Corral and do nothing outside Corral terminals."
-            + " Running agents pick them up on their next start."
+        alert.messageText = "Install status hooks?"
+        alert.informativeText = Self.integrationText(plan)
         alert.addButton(withTitle: "Install")
         alert.addButton(withTitle: "Cancel")
         guard runAlert(alert) == .alertFirstButtonReturn else { return }
@@ -168,6 +209,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificat
         do { if !status.claude { _ = try Integrations.installClaude(settingsURL: paths.claudeSettings) } } catch { errors.append("Claude: \(error.localizedDescription)") }
         do { if !status.opencode { try Integrations.installOpenCode(pluginDir: paths.opencodePluginDir) } } catch { errors.append("OpenCode: \(error.localizedDescription)") }
         do { if !status.pi { try Integrations.installPi(extensionDir: paths.piExtensionDir) } } catch { errors.append("PI: \(error.localizedDescription)") }
+        for agent in plan { manager.setHooksRemoved(agent, false) }
         manager.refreshIntegrations()
         if !errors.isEmpty {
             let e = NSAlert()
@@ -175,6 +217,16 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificat
             e.informativeText = errors.joined(separator: "\n")
             _ = runAlert(e)
         }
+    }
+
+    /// The install prompt's text: what the hooks do, no file paths (Settings › Agents lists those).
+    static func integrationText(_ agents: [AgentKind]) -> String {
+        let names = agents.map(\.displayName)
+        let list = names.count < 2 ? names.joined() : names.dropLast().joined(separator: ", ") + " and " + names[names.count - 1]
+        return "Corral adds status hooks to \(list), so the sidebar shows when an agent is working, waiting "
+            + "for input or done. They do nothing outside Corral."
+            + (agents.contains(.claude) ? " Your Claude Code settings are backed up first." : "")
+            + "\n\nRunning agents pick them up on their next start."
     }
 
     @objc func openGhosttyConfig(_ sender: Any?) {

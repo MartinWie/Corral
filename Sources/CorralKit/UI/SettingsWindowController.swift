@@ -71,7 +71,11 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     /// Install button (hooks missing) and "Status hooks on" (installed), per agent with an integration.
     private(set) var installButtons: [AgentKind: NSButton] = [:]
     private(set) var installedLabels: [AgentKind: NSView] = [:]
+    /// Next to "Status hooks on": takes the hooks out again.
+    private(set) var removeButtons: [AgentKind: NSButton] = [:]
     private(set) var agentHeaders: [AgentKind: SettingsRow] = [:]
+    /// Each agent's section, greyed out while the agent isn't installed.
+    private(set) var agentLists: [AgentKind: SettingsList] = [:]
     private var folderIds: [UUID?] = []
     /// Folder list the popup menus were built from; menus are rebuilt only when it changes.
     private var folderSignature: [String]?
@@ -105,6 +109,9 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     static let titleColumn: CGFloat = 110
     static let popupWidth: CGFloat = 200
     static let notSet = "Not set"
+    static let notInstalled = "Not installed on this Mac."
+    /// Agents that aren't installed: shown, but greyed out.
+    static let unavailableAlpha: CGFloat = 0.45
     static let looseTitle = "Next to selection"
     static let agentsFootnote = "A folder's own default directory wins over these. With no default at all, a new session "
         + "starts in the selected session's directory, then in your home folder."
@@ -289,8 +296,14 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
                 check.symbolConfiguration = .init(pointSize: 12, weight: .semibold)
                 let label = NSTextField(labelWithString: "Status hooks on")
                 label.font = NSFont.systemFont(ofSize: 12, weight: .medium)
-                let installed = NSStackView(views: [check, label])
+                let remove = NSButton(title: "Remove", target: nil, action: nil)
+                button(remove, #selector(removeIntegration(_:)))
+                remove.tag = i
+                remove.setAccessibilityLabel("Remove \(agent.displayName) status hooks")
+                removeButtons[agent] = remove
+                let installed = NSStackView(views: [check, label, remove])
                 installed.spacing = 5
+                installed.setCustomSpacing(10, after: label)
                 installed.setAccessibilityElement(true)
                 installed.setAccessibilityLabel("\(agent.displayName) status hooks installed")
                 installedLabels[agent] = installed
@@ -343,6 +356,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             clearButtons[agent] = clear
             chooseButtons[agent] = choose
             let list = SettingsList([header, start, folder])
+            agentLists[agent] = list
             list.setAccessibilityElement(true)
             list.setAccessibilityRole(.group)
             list.setAccessibilityLabel(agent.displayName)
@@ -524,11 +538,18 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         for agent in AgentKind.allCases where agent != .shell {
             let on = status.installed(agent)
             let present = manager.env.agentPresent(agent, manager.env.integrationPaths)
+            let installed = manager.installedAgents.contains(agent)
             installButtons[agent]?.isHidden = on || !present
             installedLabels[agent]?.isHidden = !on
             agentHeaders[agent]?.caption = present || on ? integrationCaption(agent)
-                : "Not set up on this Mac yet. Start \(agent.displayName) once, then install its hooks here."
+                : installed ? "Not set up on this Mac yet. Start \(agent.displayName) once, then install its hooks here."
+                : Self.notInstalled
+            agentLists[agent]?.alphaValue = installed ? 1 : Self.unavailableAlpha
+            // Clear stays usable: a start directory set before the agent went away can still be removed.
+            for control in [chooseButtons[agent], folderPopups[agent]] as [NSControl?] { control?.isEnabled = installed }
         }
+        shortcutsView?.setUnavailable(Set(AgentKind.allCases.filter { !manager.installedAgents.contains($0) }
+            .map { NSStringFromSelector($0.newSessionAction) }))
     }
 
     static let keepAwakeCaption = "Only while a session or background job is working, never while it waits for you. "
@@ -638,10 +659,44 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             case .opencode: try Integrations.installOpenCode(pluginDir: paths.opencodePluginDir)
             case .pi: try Integrations.installPi(extensionDir: paths.piExtensionDir)
             }
+            manager.setHooksRemoved(kind, false)
         } catch {
             manager.env.alert("Couldn't install the \(kind.displayName) hooks", error.localizedDescription)
         }
         manager.refreshIntegrations()
+    }
+
+    /// Asks first: without hooks the sidebar reads that agent's status from the terminal only.
+    @objc func removeIntegration(_ sender: NSButton) {
+        let kind = agent(sender)
+        guard kind != .shell else { return }
+        let alert = NSAlert()
+        alert.messageText = "Remove the \(kind.displayName) status hooks?"
+        alert.informativeText = Self.removeText(kind)
+        alert.addButton(withTitle: "Remove")
+        alert.addButton(withTitle: "Cancel")
+        Presenter.alert(alert, window) { [weak self] answer in
+            guard answer == .alertFirstButtonReturn, let self else { return }
+            let paths = self.manager.env.integrationPaths
+            do {
+                switch kind {
+                case .shell: return
+                case .claude: _ = try Integrations.uninstallClaude(settingsURL: paths.claudeSettings)
+                case .opencode: try Integrations.uninstallOpenCode(pluginDir: paths.opencodePluginDir)
+                case .pi: try Integrations.uninstallPi(extensionDir: paths.piExtensionDir)
+                }
+                self.manager.setHooksRemoved(kind, true)
+            } catch {
+                self.manager.env.alert("Couldn't remove the \(kind.displayName) hooks", error.localizedDescription)
+            }
+            self.manager.refreshIntegrations()
+        }
+    }
+
+    static func removeText(_ agent: AgentKind) -> String {
+        "Corral then reads \(agent.displayName)'s status from the terminal only, which is less exact. "
+            + "Running sessions keep the hooks until they restart."
+            + (agent == .claude ? " Your Claude Code settings are backed up first." : "")
     }
 
     @objc func openConfig(_ sender: Any?) {

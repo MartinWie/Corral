@@ -404,17 +404,20 @@ public struct AppSettings: Codable, Equatable, Sendable {
     /// Hold off idle sleep while an agent is working (not while it waits for the user).
     public var keepAwake = false
     public var notifications = NotificationSettings()
+    /// Agents whose status hooks the user removed in Settings: the sidebar stops offering them.
+    public var hooksRemoved: Set<AgentKind> = []
 
     public init(keepAwake: Bool = false, notifications: NotificationSettings = NotificationSettings()) {
         self.keepAwake = keepAwake
         self.notifications = notifications
     }
 
-    enum CodingKeys: String, CodingKey { case keepAwake, notifications }
+    enum CodingKeys: String, CodingKey { case keepAwake, notifications, hooksRemoved }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         keepAwake = try c.decodeIfPresent(Bool.self, forKey: .keepAwake) ?? false
         notifications = (try? c.decodeIfPresent(NotificationSettings.self, forKey: .notifications)) ?? NotificationSettings()
+        hooksRemoved = (try? c.decodeIfPresent(Set<AgentKind>.self, forKey: .hooksRemoved)) ?? []
     }
 }

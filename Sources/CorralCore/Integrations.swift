@@ -75,6 +75,16 @@ public enum Integrations {
         }
     }
 
+    /// Installed on this Mac: its config folder exists or its command is on `path` (the login shell's
+    /// PATH) or in `fallbacks`. Menus offer only installed agents; Settings greys out the rest. Hooks
+    /// are offered by the stricter `toolPresent` (the agent has run here).
+    public static func installed(_ agent: AgentKind, paths: Paths = .standard,
+                                 path: String? = ShellEnvironment.value("PATH"),
+                                 fallbacks: [String] = BackgroundAgents.defaultFallbacks) -> Bool {
+        guard let command = agent.launchCommand else { return true }
+        return toolPresent(agent, paths: paths) || BackgroundAgents.command(command, path: path, fallbacks: fallbacks) != nil
+    }
+
     public static func status(paths: Paths = .standard) -> Status {
         let settings = (try? String(contentsOf: paths.claudeSettings, encoding: .utf8)) ?? ""
         let fm = FileManager.default
@@ -102,6 +112,17 @@ public enum Integrations {
     /// Refuses rather than guesses: unreadable files and unexpected shapes throw and leave the file alone.
     /// Symlinks are followed (dotfile setups) and the original permissions are kept.
     public static func installClaude(settingsURL: URL) throws -> URL? {
+        try rewriteSettings(settingsURL, mergeHooks(into:))
+    }
+
+    /// Takes Corral's hooks out of Claude's settings.json (backup kept next to it); everything else stays
+    /// as it was. Returns the backup, or nil when there were none.
+    public static func uninstallClaude(settingsURL: URL) throws -> URL? {
+        try rewriteSettings(settingsURL, removeHooks(from:))
+    }
+
+    /// Applies `change` to settings.json (nil: nothing to do) with a backup of the old file.
+    static func rewriteSettings(_ settingsURL: URL, _ change: ([String: Any]) throws -> [String: Any]?) throws -> URL? {
         let target = settingsURL.resolvingSymlinksInPath()
         let fm = FileManager.default
         var attempts = 0
@@ -115,8 +136,7 @@ public enum Integrations {
                 }
                 root = obj
             }
-            let merged = try mergeHooks(into: root)
-            guard let merged else { return nil }  // already installed
+            guard let merged = try change(root) else { return nil }
             let out = try JSONSerialization.data(withJSONObject: merged, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
 
             // Claude may rewrite settings.json (e.g. "don't ask again"); merge again if it changed meanwhile.
@@ -184,6 +204,34 @@ public enum Integrations {
         return root
     }
 
+    /// Returns the settings without Corral's hook commands (groups and events left empty go too), or nil
+    /// when there are none.
+    static func removeHooks(from root: [String: Any]) throws -> [String: Any]? {
+        guard let existing = root["hooks"] else { return nil }
+        guard var hooks = existing as? [String: Any] else {
+            throw InstallError(message: "\"hooks\" in settings.json is not an object; not touching it")
+        }
+        var changed = false
+        for (event, value) in hooks {
+            guard let groups = value as? [[String: Any]] else { continue }
+            let kept = groups.compactMap { group -> [String: Any]? in
+                guard let list = group["hooks"] as? [[String: Any]] else { return group }
+                let others = list.filter { ($0["command"] as? String)?.contains(marker) != true }
+                guard others.count != list.count else { return group }
+                changed = true
+                if others.isEmpty { return nil }
+                var group = group
+                group["hooks"] = others
+                return group
+            }
+            hooks[event] = kept.isEmpty ? nil : kept
+        }
+        guard changed else { return nil }
+        var root = root
+        root["hooks"] = hooks.isEmpty ? nil : hooks
+        return root
+    }
+
     public static func installOpenCode(pluginDir: URL) throws {
         try FileManager.default.createDirectory(at: pluginDir, withIntermediateDirectories: true)
         try opencodePlugin.write(to: pluginDir.appendingPathComponent("corral.js"), atomically: true, encoding: .utf8)
@@ -192,6 +240,24 @@ public enum Integrations {
     public static func installPi(extensionDir: URL) throws {
         try FileManager.default.createDirectory(at: extensionDir, withIntermediateDirectories: true)
         try piExtension.write(to: extensionDir.appendingPathComponent("corral.ts"), atomically: true, encoding: .utf8)
+    }
+
+    public static func uninstallOpenCode(pluginDir: URL) throws {
+        try removeOwnFile(pluginDir.appendingPathComponent("corral.js"))
+    }
+
+    public static func uninstallPi(extensionDir: URL) throws {
+        try removeOwnFile(extensionDir.appendingPathComponent("corral.ts"))
+    }
+
+    /// Deletes a plugin file only when it is Corral's (its first line says so); a missing one is fine.
+    static func removeOwnFile(_ url: URL) throws {
+        guard let data = try readIfPresent(url) else { return }
+        let first = String(decoding: data.prefix(200), as: UTF8.self)
+        guard first.hasPrefix("// Corral status reporter") else {
+            throw InstallError(message: "\(url.path) isn't Corral's; not removing it")
+        }
+        try FileManager.default.removeItem(at: url)
     }
 
     // MARK: Agent-side sources

@@ -16,8 +16,9 @@ struct LaunchTests {
         let id = try #require(f.selected)
         let t = try #require(f.terminal(id))
         #expect(t.launch.initialInput == nil)
-        #expect(t.launch.agentInput == "claude")
-        #expect(t.launch.command == AgentLaunch.command(input: "claude", shell: "/bin/zsh", agent: .claude))
+        let start = "claude --session-id \(try #require(f.manager.workspace.sessions[id]?.agentSessionId))"
+        #expect(t.launch.agentInput == start)
+        #expect(t.launch.command == AgentLaunch.command(input: start, shell: "/bin/zsh", agent: .claude))
         #expect(t.launch.env["CORRAL_HOOK"] == "/bin/true")
         #expect(f.manager.launchKind(id) == .starting)
         #expect(f.manager.launchingCount == 1)

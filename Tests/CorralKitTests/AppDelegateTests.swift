@@ -31,6 +31,17 @@ struct AppDelegateTests {
         #expect(d.buildMenu().items[1].submenu?.items.suffix(2).allSatisfy { !$0.isHidden } == true)
     }
 
+    /// A second copy (e.g. opened from the DMG) hands over to the running Corral instead of sharing its state.
+    @Test func secondInstanceBringsTheFirstForwardAndQuits() {
+        let d = AppDelegate(makeTerminals: { FakeFactory() })
+        var activated = false, quits = 0
+        d.otherInstance = { { activated = true } }
+        d.quit = { quits += 1 }
+        d.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+        #expect(activated && quits == 1 && d.manager == nil)
+        #expect(d.applicationShouldTerminate(NSApplication.shared) == .terminateNow)
+    }
+
     @Test func installIntegrationsAndTerminationPrompts() throws {
         let f = Fixture()
         defer { f.cleanup() }

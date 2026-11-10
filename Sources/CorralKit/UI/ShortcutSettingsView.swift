@@ -139,6 +139,21 @@ final class ShortcutSettingsView: NSView {
 
     func row(_ id: String) -> Row? { rows.first { $0.id == id } }
 
+    /// Commands of agents that aren't installed: listed greyed out (their shortcut can still be set).
+    private(set) var unavailable: Set<String> = []
+
+    func setUnavailable(_ ids: Set<String>) {
+        guard ids != unavailable else { return }
+        let changed = ids.symmetricDifference(unavailable)
+        unavailable = ids
+        for row in rows where changed.contains(row.id) {
+            let off = ids.contains(row.id)
+            let alpha: CGFloat = off ? SettingsWindowController.unavailableAlpha : 1
+            for v in [row.name, row.recorder] as [NSView] { v.alphaValue = alpha }
+            row.name.toolTip = off ? SettingsWindowController.notInstalled : nil
+        }
+    }
+
     // MARK: State
 
     /// Offers a recorded combo to the store.

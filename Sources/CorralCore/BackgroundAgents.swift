@@ -54,20 +54,26 @@ public enum BackgroundAgents {
         return claudeDir.appendingPathComponent("jobs")
     }
 
-    /// Where installers put `claude` when the login shell's PATH doesn't have it (native installer,
-    /// Homebrew, npm/volta/bun global bins).
+    /// Where agent installers put their command when the login shell's PATH doesn't have it (native
+    /// installers, Homebrew, npm/volta/bun global bins).
     public static func fallbackDirs(home: String) -> [String] {
-        ["\(home)/.local/bin", "\(home)/.claude/local", "/opt/homebrew/bin", "/usr/local/bin",
+        ["\(home)/.local/bin", "\(home)/.claude/local", "\(home)/.opencode/bin", "/opt/homebrew/bin", "/usr/local/bin",
          "\(home)/.npm-global/bin", "\(home)/.volta/bin", "\(home)/.bun/bin"]
     }
 
-    /// `claude` on the login shell's PATH (absolute entries only: relative ones would resolve against
-    /// Corral's own directory), else in `fallbacks`. A file, never a folder named claude.
+    public static var defaultFallbacks: [String] { fallbackDirs(home: FileManager.default.homeDirectoryForCurrentUser.path) }
+
+    /// `claude` on the login shell's PATH, else in `fallbacks`.
     public static func claudeBinary(path: String? = ShellEnvironment.value("PATH"),
-                                    fallbacks: [String] = fallbackDirs(home: FileManager.default.homeDirectoryForCurrentUser.path))
-        -> String? {
+                                    fallbacks: [String] = defaultFallbacks) -> String? {
+        command("claude", path: path, fallbacks: fallbacks)
+    }
+
+    /// `name` on PATH (absolute entries only: relative ones would resolve against Corral's own
+    /// directory), else in `fallbacks`. An executable file, never a folder of that name.
+    public static func command(_ name: String, path: String?, fallbacks: [String]) -> String? {
         let dirs = (path ?? "").split(separator: ":").map(String.init).filter { $0.hasPrefix("/") } + fallbacks
-        return dirs.lazy.map { ($0 as NSString).appendingPathComponent("claude") }.first { candidate in
+        return dirs.lazy.map { ($0 as NSString).appendingPathComponent(name) }.first { candidate in
             var dir: ObjCBool = false
             return FileManager.default.fileExists(atPath: candidate, isDirectory: &dir) && !dir.boolValue
                 && FileManager.default.isExecutableFile(atPath: candidate)

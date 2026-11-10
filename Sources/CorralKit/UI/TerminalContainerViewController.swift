@@ -205,7 +205,10 @@ final class TerminalContainerViewController: NSViewController {
             if focus { view.window?.makeFirstResponder(manager.focusedTerminal(sel)?.view ?? ls.terminal.view) }
         } else {
             launchCover.dismiss(animated: false)
-            presentPlaceholder(.empty) { placeholder.showEmpty() }
+            presentPlaceholder(.empty) {
+                placeholder.showAgents(manager.installedAgents)
+                placeholder.showEmpty()
+            }
         }
     }
 

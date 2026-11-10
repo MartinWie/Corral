@@ -1185,7 +1185,9 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             menu.addItem(item("Close Session", #selector(closeClicked(_:)), represented: id))
         case .folder(let id):
             menu.addItem(item("New Shell Here", #selector(newShellInFolder(_:)), represented: id))
-            menu.addItem(item("New Claude Session Here", #selector(newClaudeInFolder(_:)), represented: id))
+            if manager.installedAgents.contains(.claude) {
+                menu.addItem(item("New Claude Session Here", #selector(newClaudeInFolder(_:)), represented: id))
+            }
             menu.addItem(item("New Subfolder", #selector(newSubfolder(_:)), represented: id))
             menu.addItem(.separator())
             menu.addItem(item("Rename…", #selector(renameClicked(_:)), represented: id))
@@ -1227,7 +1229,8 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     private func defaultFolderItem(_ id: UUID) -> NSMenuItem {
         let mi = NSMenuItem(title: "Default Folder for New", action: nil, keyEquivalent: "")
         let sub = NSMenu()
-        for agent in AgentKind.allCases {
+        for agent in AgentKind.allCases
+        where manager.installedAgents.contains(agent) || manager.workspace.defaults(for: agent).folder == id {
             let entry = item(agent == .shell ? "Shells" : "\(agent.displayName) Sessions", #selector(toggleDefaultFolder(_:)),
                              represented: [id, agent.rawValue] as [Any])
             entry.state = manager.workspace.defaults(for: agent).folder == id ? .on : .off

@@ -123,7 +123,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSPopove
                 self.refreshAttention()
             case .appearance:
                 self.terminalAppearanceChanged()
-            case .integrations, .settings, .reveal:
+            case .integrations:
+                self.container.placeholder.showAgents(self.manager.installedAgents)
+                self.toolbarDelegate.showInstalledAgents()
+            case .settings, .reveal:
                 break
             case .panes(let id):
                 self.container.panesChanged(id)
@@ -370,12 +373,13 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSPopove
     @objc func newPi(_ sender: Any?) { manager.newSession(agent: .pi, folder: targetFolder) }
 
     @objc func newInDirectory(_ sender: Any?) {
+        let agents = AgentKind.allCases.filter(manager.installedAgents.contains)
         let agentPicker = NSPopUpButton()
-        for a in AgentKind.allCases { agentPicker.addItem(withTitle: a.displayName) }
+        for a in agents { agentPicker.addItem(withTitle: a.displayName) }
         Presenter.chooseDirectory(start: manager.currentDirectory ?? NSHomeDirectory(), prompt: "Open Here",
                                   accessory: agentPicker, window: window) { [weak self] url in
             guard let url, let self else { return }
-            let agent = AgentKind.allCases[max(0, agentPicker.indexOfSelectedItem)]
+            let agent = agents[max(0, agentPicker.indexOfSelectedItem)]
             self.manager.newSession(agent: agent, cwd: url.path, folder: self.targetFolder)
         }
     }
@@ -385,8 +389,12 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSPopove
         sidebar.promptRename(id)
     }
 
+    /// The window in front (tests pin it); see `FrontWindow`.
+    var keyWindow: () -> NSWindow? = { NSApp.keyWindow }
+
     /// ⌘W closes the focused split pane, else the session.
     @objc func closeSession(_ sender: Any?) {
+        if FrontWindow.close(key: keyWindow(), main: window) { return }
         if let responder = window?.firstResponder as? NSView, let pane = manager.pane(containing: responder) {
             manager.requestClosePane(pane.id)
             return
@@ -519,6 +527,8 @@ final class ToolbarDelegate: NSObject, NSToolbarDelegate {
     let searchButton: GhostButton
     let attention: AttentionToolbarView
     let newMenu = NSMenu(title: "New")
+    /// The + item's copy in the toolbar overflow (a menu has one parent, so it can't be `newMenu`).
+    private(set) var overflowMenu: NSMenu?
 
     init(owner: MainWindowController? = nil) {
         self.owner = owner
@@ -580,8 +590,10 @@ final class ToolbarDelegate: NSObject, NSToolbarDelegate {
         case Self.newID:
             let item = makeItem(id, newButton, label: "New", action: nil)
             let form = NSMenuItem(title: "New", action: nil, keyEquivalent: "")
-            form.submenu = newMenu.copy() as? NSMenu
+            overflowMenu = newMenu.copy() as? NSMenu
+            form.submenu = overflowMenu
             item.menuFormRepresentation = form
+            showInstalledAgents()
             return item
         case Self.attentionID:
             let item = makeItem(id, attention, label: "Next Needing Input", action: #selector(MainWindowController.nextAttention(_:)))
@@ -613,8 +625,17 @@ final class ToolbarDelegate: NSObject, NSToolbarDelegate {
     /// The + button opens the new-session menu right below itself.
     @objc func showNewMenu(_ sender: NSView) {
         refreshHints()
+        showInstalledAgents()
         let y = sender.isFlipped ? sender.bounds.maxY + 4 : -4
         newMenu.popUp(positioning: nil, at: NSPoint(x: 0, y: y), in: sender)
+    }
+
+    /// New-session entries only for installed agents.
+    func showInstalledAgents() {
+        let installed = owner?.manager.installedAgents ?? [.shell]
+        for item in [newMenu, overflowMenu].compactMap({ $0 }).flatMap(\.items) {
+            if let agent = AgentKind.startedBy(item.action) { item.isHidden = !installed.contains(agent) }
+        }
     }
 
     /// Tooltips and menu shortcuts come from the real main menu (never hardcoded); nil without one.
@@ -641,5 +662,28 @@ final class ToolbarDelegate: NSObject, NSToolbarDelegate {
             if let hit = menuItem(for: action, in: item.submenu) { return hit }
         }
         return nil
+    }
+}
+
+extension AgentKind {
+    /// The menu command that starts a new session of this kind.
+    var newSessionAction: Selector {
+        switch self {
+        case .shell: return #selector(MainWindowController.newShell(_:))
+        case .claude: return #selector(MainWindowController.newClaude(_:))
+        case .opencode: return #selector(MainWindowController.newOpenCode(_:))
+        case .pi: return #selector(MainWindowController.newPi(_:))
+        }
+    }
+
+    /// The kind a new-session command starts.
+    static func startedBy(_ action: Selector?) -> AgentKind? { allCases.first { $0.newSessionAction == action } }
+}
+
+extension MainWindowController: NSMenuItemValidation {
+    /// Agents that aren't installed can't be started, also not through their (hidden) items' shortcuts.
+    func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        guard let agent = AgentKind.startedBy(item.action) else { return true }
+        return manager.installedAgents.contains(agent)
     }
 }

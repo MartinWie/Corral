@@ -148,6 +148,8 @@ public struct ManagerEnvironment {
     /// Whether an agent is set up on this Mac (its config folder exists); integrations are only
     /// offered for those.
     public var agentPresent: (AgentKind, Integrations.Paths) -> Bool = { Integrations.toolPresent($0, paths: $1) }
+    /// Whether an agent is installed (command or config folder); menus offer only those.
+    public var agentInstalled: (AgentKind, Integrations.Paths) -> Bool = { Integrations.installed($0, paths: $1) }
 
     /// getpwuid's shell, else $SHELL, else /bin/zsh (the macOS default).
     public static func defaultLoginShell() -> String {
@@ -223,6 +225,7 @@ final class SessionManager: TerminalActionHandler {
         // The index opens in start(); their old scrollback leaves it then.
         staleScrollback = workspace.forgetClosedShells().map { "corral:\($0.uuidString)" }
         integrations = Integrations.status(paths: env.integrationPaths)
+        installedAgents = Self.detectInstalled(env)
         terminals.actionHandler = self
         // Closed sessions whose conversation doesn't exist ("No conversation found") can't be resumed.
         let transcripts = Self.claudeTranscripts(root: env.roots.claudeProjects)
@@ -284,6 +287,14 @@ final class SessionManager: TerminalActionHandler {
         emit(.settings)
     }
 
+    /// Hooks the user removed aren't offered by the sidebar again; installing them clears it.
+    func setHooksRemoved(_ agent: AgentKind, _ removed: Bool) {
+        guard workspace.settings.hooksRemoved.contains(agent) != removed else { return }
+        if removed { workspace.settings.hooksRemoved.insert(agent) } else { workspace.settings.hooksRemoved.remove(agent) }
+        scheduleSave()
+        emit(.integrations)
+    }
+
     func setKeepAwake(_ on: Bool) {
         guard workspace.settings.keepAwake != on else { return }
         workspace.settings.keepAwake = on
@@ -316,7 +327,25 @@ final class SessionManager: TerminalActionHandler {
 
     /// Agents set up on this Mac whose status hooks are missing (the sidebar banner offers them).
     var missingIntegrations: [AgentKind] {
-        [AgentKind.claude, .opencode, .pi].filter { env.agentPresent($0, env.integrationPaths) && !integrations.installed($0) }
+        [AgentKind.claude, .opencode, .pi].filter {
+            env.agentPresent($0, env.integrationPaths) && !integrations.installed($0) && !workspace.settings.hooksRemoved.contains($0)
+        }
+    }
+
+    /// The shell and the agents installed on this Mac. New-session menus, the empty window and folder
+    /// menus offer only these; Settings greys out the others.
+    private(set) var installedAgents: Set<AgentKind> = [.shell]
+
+    static func detectInstalled(_ env: ManagerEnvironment) -> Set<AgentKind> {
+        Set(AgentKind.allCases.filter { $0 == .shell || env.agentInstalled($0, env.integrationPaths) })
+    }
+
+    /// Re-checks which agents are installed (cheap: a few file lookups). Emits `.integrations` on a change.
+    func refreshInstalledAgents() {
+        let now = Self.detectInstalled(env)
+        guard now != installedAgents else { return }
+        installedAgents = now
+        emit(.integrations)
     }
 
     // MARK: Startup
@@ -327,6 +356,16 @@ final class SessionManager: TerminalActionHandler {
         // Cards shared by sessions of the last run (only open ones; shells in panes aren't kept).
         for (owner, layout) in workspace.openSplits { setLayout(layout, for: owner) }
         saveSplits()
+        // Before restoring: the index names the conversations of sessions saved without an id.
+        do {
+            try index.open()
+            staleScrollback.forEach(index.removeSession(key:))
+            staleScrollback = []
+            recoverSessionIds()
+            index.refresh(roots: env.roots)
+        } catch {
+            NSLog("Corral: search index unavailable: \(error)")
+        }
         // The session on screen first (with the sessions sharing its card), the rest a few at a
         // time (see `restoreConcurrency`).
         pendingRestore = order
@@ -335,15 +374,6 @@ final class SessionManager: TerminalActionHandler {
 
         eventServer = EventServer(path: env.socketPath) { [weak self] msg in self?.handleHook(msg) }
         do { try eventServer?.start() } catch { NSLog("Corral: hook socket failed: \(error)") }
-
-        do {
-            try index.open()
-            staleScrollback.forEach(index.removeSession(key:))
-            staleScrollback = []
-            index.refresh(roots: env.roots)
-        } catch {
-            NSLog("Corral: search index unavailable: \(error)")
-        }
 
         ensureWatchers()
         reloadBackground()
@@ -493,7 +523,8 @@ final class SessionManager: TerminalActionHandler {
     private func restore(_ id: UUID) {
         pendingRestore.removeAll { $0 == id }
         guard live[id] == nil, let record = workspace.sessions[id], record.closedAt == nil else { return }
-        spawn(record, input: record.restoreInput, resuming: record.restoreInput != nil)
+        let (input, resuming) = relaunch(record, input: record.restoreInput)
+        spawn(record, input: input, resuming: resuming)
         // Into the window now (hidden, at its real size): replaying at a default size would redraw
         // the whole transcript again when it is first shown.
         emit(.structure)
@@ -537,6 +568,36 @@ final class SessionManager: TerminalActionHandler {
         scheduleLaunchProbe()
     }
 
+    /// Claude sessions saved without their conversation's id (started before the status hooks were
+    /// installed, or `claude` typed by hand without them) get it back from the conversation that has
+    /// the session's title, when exactly one has it and no other session holds that id. They resume.
+    func recoverSessionIds() {
+        var held = Set(workspace.sessions.values.compactMap(\.agentSessionId))
+        for id in workspace.openSessionsInOrder {
+            guard var r = workspace.sessions[id], r.agent == .claude, r.agentSessionId == nil, r.bgJobId == nil else { continue }
+            let titles = [r.customName, r.autoTitle].compactMap { $0 }
+            guard let found = titles.lazy.compactMap(index.claudeSession(titled:)).first,
+                  !held.contains(found.sessionId) else { continue }
+            r.agentSessionId = found.sessionId
+            r.agentCwd = found.cwd.isEmpty ? r.cwd : found.cwd
+            r.agentRunning = true
+            workspace.sessions[id] = r
+            held.insert(found.sessionId)
+            scheduleSave()
+        }
+    }
+
+    /// What a restored or reopened session runs: its resume command, or for a Claude session that never
+    /// wrote its conversation (opened, nothing typed) a fresh start under the same id, since resuming
+    /// it would only print "No conversation found".
+    func relaunch(_ record: SessionRecord, input: String?) -> (input: String?, resuming: Bool) {
+        if input != nil, record.bgJobId == nil, let sid = record.agentSessionId, missingTranscript(record),
+           let fresh = record.agent.startCommand(sessionId: sid) {
+            return (fresh, false)
+        }
+        return (input, input != nil)
+    }
+
     static func hasVisibleText(_ text: String) -> Bool {
         text.unicodeScalars.contains { !CharacterSet.whitespacesAndNewlines.contains($0) }
     }
@@ -545,11 +606,18 @@ final class SessionManager: TerminalActionHandler {
                     input: String? = nil, agentSessionId: String? = nil, bgJobId: String? = nil) {
         let (targetFolder, index, dir) = workspace.placement(for: agent, folder: folder, cwd: cwd,
                                                              currentDirectory: currentDirectory, home: NSHomeDirectory())
+        let resuming = agentSessionId != nil
+        var input = input, agentSessionId = agentSessionId
+        // A fresh Claude session gets its id now, so it resumes after a relaunch even without hooks.
+        if input == nil, agentSessionId == nil {
+            let sid = UUID().uuidString.lowercased()
+            if let command = agent.startCommand(sessionId: sid) { (input, agentSessionId) = (command, sid) }
+        }
         var record = SessionRecord(cwd: dir, agent: agent, title: title, agentSessionId: agentSessionId)
         record.bgJobId = bgJobId
         if agentSessionId != nil { record.agentCwd = dir }
         workspace.addSession(record, in: targetFolder, at: index)
-        spawn(record, input: input ?? agent.launchCommand, resuming: agentSessionId != nil)
+        spawn(record, input: input ?? agent.launchCommand, resuming: resuming)
         emit(.structure)
         select(record.id)
     }
@@ -625,7 +693,8 @@ final class SessionManager: TerminalActionHandler {
         }
         workspace.reopen(id, in: folder, at: index)
         guard let reopened = workspace.sessions[id] else { return }
-        spawn(reopened, input: reopened.reopenInput, resuming: reopened.reopenInput != nil)
+        let (input, resuming) = relaunch(reopened, input: reopened.reopenInput)
+        spawn(reopened, input: input, resuming: resuming)
         emit(.structure)
         select(id)
     }
@@ -1032,6 +1101,7 @@ final class SessionManager: TerminalActionHandler {
 
     func refreshIntegrations() {
         integrations = Integrations.status(paths: env.integrationPaths)
+        installedAgents = Self.detectInstalled(env)
         emit(.integrations)
     }
 

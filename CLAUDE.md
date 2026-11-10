@@ -1,7 +1,7 @@
 # Corral
 
-macOS session orchestrator for Claude Code / OpenCode / PI on embedded libghostty. See README.md
-for features and build. Public repo (github.com/MartinWie/Corral); releases and updates go through
+macOS session orchestrator for Claude Code / OpenCode / PI on embedded libghostty. README.md is the
+public overview (keep it short); behavior details, perf budgets and layout are in docs/internals.md. Public repo (github.com/MartinWie/Corral); releases and updates go through
 GitHub Releases.
 
 Privacy rule: nothing committed or shipped may identify the author. No real names, emails, home paths,
@@ -70,6 +70,23 @@ image metadata) or build output. `scripts/leak-scan.py` checks shipped files; ex
   with one) backed by `SparkleUpdater` in the Corral target. Sparkle is a dependency of the app target
   only, so core/kit tests resolve no packages. Bench runs get no updater. Updates always prompt:
   `SUAllowsAutomaticUpdates` false (no silent installs, no checkbox offering them); daily checks on.
+- Agents offered: `SessionManager.installedAgents` (`env.agentInstalled`: command on the login shell's
+  PATH or fallback dirs, or config folder; refreshed on app activation and when Settings opens). Hooks
+  are offered by the stricter `agentPresent` (config folder: the agent has run here). New-session items
+  stay in the menu, hidden and disabled (`MainWindowController.validateMenuItem`); `ShortcutStore.register`
+  runs before they are hidden, so Settings › Shortcuts lists them greyed out.
+- Claude session ids: new Claude sessions run `claude --session-id <uuid>` and save it at once, so they
+  resume without hooks. Restoring or reopening one whose conversation was never written starts fresh
+  under the same id (`relaunch`). At start the index opens before restoring, and id-less Claude records
+  take the id of the only conversation with their title (`recoverSessionIds`).
+- ⌘W ("Close Session") with another window in front goes through `FrontWindow.close`: that window
+  closes (panels without a close button cancel), a sheet beeps; never the session behind it.
+- Removing hooks (Settings › Agents › Remove): `Integrations.uninstall*` take out only Corral's hook
+  commands (settings.json backed up, unknown shapes refused) and only plugin files whose first line is
+  Corral's. `AppSettings.hooksRemoved` keeps the sidebar banner from offering them again; installing
+  clears it.
+- One instance per support folder: a second Corral brings the first forward and quits
+  (`AppDelegate.otherInstance`); `CORRAL_SUPPORT_DIR` exempts tests and benches.
 - corral-hook is C on purpose: Claude runs hooks synchronously (and `async: true` would let
   PostToolUse race past Stop). Keep it parse-free; event name comes from argv.
 - Index work drains autorelease pools per chunk/file (JSONSerialization); without them a first

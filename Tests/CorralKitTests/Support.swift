@@ -150,6 +150,7 @@ final class Fixture {
                                     done(fx.permission)
                                 })
         env.agentPresent = { _, _ in true }
+        env.agentInstalled = { _, _ in true }
         env.alert = { title, _ in fx.alerts.append(title) }
         env.setBadge = { fx.badges.append($0) }
         env.terminate = { fx.terminated += 1 }

@@ -301,6 +301,22 @@ public final class SearchIndex {
 
     /// Call on `readQueue`. Without a query: the latest messages, so the preview still shows what
     /// the session was about.
+    /// `claudeSessionSync` on the read queue (a few rows: fine to wait for at startup).
+    public func claudeSession(titled title: String) -> (sessionId: String, cwd: String)? {
+        (try? readQueue.sync { try claudeSessionSync(titled: title) }) ?? nil
+    }
+
+    /// The Claude conversation with this title (its own or Claude's AI title), when exactly one has it.
+    func claudeSessionSync(titled title: String) throws -> (sessionId: String, cwd: String)? {
+        guard let db = readDB, !title.isEmpty else { return nil }
+        var found: [(String, String)] = []
+        try db.prepare("""
+        SELECT session_id, cwd FROM sessions WHERE agent = 'claude' AND (title_custom = ? OR title_ai = ?) LIMIT 2
+        """).bind(title, title).rows { row in found.append((row.string(0) ?? "", row.string(1) ?? "")) }
+        guard found.count == 1, !found[0].0.isEmpty else { return nil }
+        return found[0]
+    }
+
     public func detailSync(key: String, query: String, limit: Int = 40) throws -> SearchDetail {
         guard let db = readDB else { return SearchDetail() }
         var d = SearchDetail()

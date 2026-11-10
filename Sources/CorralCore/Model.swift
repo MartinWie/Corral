@@ -25,6 +25,12 @@ public enum AgentKind: String, Codable, CaseIterable, Sendable {
 
     /// Command that resumes an existing agent session; the terminal falls back to a shell when the
     /// agent exits.
+    /// A fresh session under an id Corral picks, so it can be resumed without the status hooks
+    /// (Claude Code only: the others choose their own ids).
+    public func startCommand(sessionId: String) -> String? {
+        self == .claude ? "claude --session-id \(shellQuote(sessionId))" : nil
+    }
+
     public func resumeCommand(sessionId: String) -> String? {
         let id = shellQuote(sessionId)
         switch self {

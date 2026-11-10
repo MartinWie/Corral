@@ -33,6 +33,9 @@ final class PlaceholderView: NSView {
         ActionTile(title: "OpenCode", symbol: GlyphCache.agentSymbol(.opencode), action: #selector(MainWindowController.newOpenCode(_:))),
         ActionTile(title: "PI", symbol: GlyphCache.agentSymbol(.pi), action: #selector(MainWindowController.newPi(_:))),
     ]
+    let tileGrid = NSGridView(numberOfColumns: 2, rows: 0)
+    private var tileWidths: [NSLayoutConstraint] = []
+    private(set) var shownTiles: [ActionTile] = []
     let searchKey = KeyCap("", surface: .card)
     let attentionKey = KeyCap("", surface: .card)
     private let hintSearch = NSTextField(labelWithString: "Search all sessions")
@@ -114,11 +117,9 @@ final class PlaceholderView: NSView {
             l.setContentCompressionResistancePriority(Self.textCompression, for: .horizontal)
         }
 
-        let tileGrid = NSGridView(views: [[tiles[0], tiles[1]], [tiles[2], tiles[3]]])
         tileGrid.rowSpacing = 10
         tileGrid.columnSpacing = 10
-        // Tiles shrink together on a narrow card (each prefers 200 at a priority below the margins).
-        for tile in tiles.dropFirst() { tile.widthAnchor.constraint(equalTo: tiles[0].widthAnchor).isActive = true }
+        showAgents(Set(AgentKind.allCases))
         // Hovered tiles cast a shadow past the grid's edges.
         tileGrid.clipsToBounds = false
         emptyPage.clipsToBounds = false
@@ -265,10 +266,10 @@ final class PlaceholderView: NSView {
             attentionHint.isHidden = !fullHint
             hintDot.isHidden = !fullHint
         }
-        // Keycaps show on all four tiles or on none, so the grid never mixes styles.
+        // Keycaps show on every shown tile or on none, so the grid never mixes styles.
         let tileWidth = min(ActionTile.size.width, (ew - 10) / 2)
-        let caps = tileWidth >= tiles.map(\.keycapNeed).max() ?? 0
-        for tile in tiles where tile.keycapAllowed != caps { tile.keycapAllowed = caps }
+        let caps = tileWidth >= shownTiles.map(\.keycapNeed).max() ?? 0
+        for tile in shownTiles where tile.keycapAllowed != caps { tile.keycapAllowed = caps }
         super.layout()
     }
 
@@ -342,6 +343,28 @@ final class PlaceholderView: NSView {
     }
 
     // MARK: Pages
+
+    /// Tiles for the shell and the installed agents, two a row, an odd last one centered.
+    func showAgents(_ installed: Set<AgentKind>) {
+        let shown = tiles.filter { AgentKind.startedBy($0.selector).map(installed.contains) ?? true }
+        guard shown != shownTiles else { return }
+        shownTiles = shown
+        while tileGrid.numberOfRows > 0 { tileGrid.removeRow(at: 0) }
+        // removeRow keeps the cells' views in the grid: a hidden agent's tile would stay clickable.
+        for tile in tiles where !shown.contains(tile) { tile.removeFromSuperview() }
+        NSLayoutConstraint.deactivate(tileWidths)
+        for start in stride(from: 0, to: shown.count, by: 2) {
+            let pair = Array(shown[start..<min(start + 2, shown.count)])
+            let row = tileGrid.addRow(with: pair)
+            if pair.count == 1 {
+                row.mergeCells(in: NSRange(location: 0, length: 2))
+                row.cell(at: 0).xPlacement = .center
+            }
+        }
+        // Tiles shrink together on a narrow card (each prefers 200 at a priority below the margins).
+        tileWidths = shown.dropFirst().map { $0.widthAnchor.constraint(equalTo: shown[0].widthAnchor) }
+        NSLayoutConstraint.activate(tileWidths)
+    }
 
     func showEmpty() {
         page = .empty
@@ -477,7 +500,7 @@ final class PlaceholderView: NSView {
         let content = page == .empty ? emptyPage : previewPage
         Motion.pageEntrance(content.layer)
         guard page == .empty, full else { return }
-        for (i, tile) in tiles.enumerated() {
+        for (i, tile) in shownTiles.enumerated() {
             Motion.entrance(tile.layer, duration: duration, delay: 0.04 + 0.03 * Double(i))
         }
     }
