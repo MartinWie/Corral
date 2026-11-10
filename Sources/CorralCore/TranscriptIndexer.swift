@@ -25,6 +25,9 @@ enum TranscriptIndexer {
     struct ParseState {
         var cwd: String?
         var custom: String?
+        /// A rename inside the agent (Claude's `custom-title`; not `agent-name`, which Claude also
+        /// writes on its own from the AI title).
+        var renamed: String?
         var ai: String?
         var firstPrompt: String?
         var created: Double?
@@ -45,7 +48,10 @@ enum TranscriptIndexer {
                   let obj = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
                   let type = obj["type"] as? String else { continue }
             switch type {
-            case "custom-title": state.custom = (obj["customTitle"] as? String) ?? state.custom; continue
+            case "custom-title":
+                state.custom = (obj["customTitle"] as? String) ?? state.custom
+                state.renamed = state.custom
+                continue
             case "agent-name": state.custom = state.custom ?? (obj["agentName"] as? String); continue
             case "ai-title": state.ai = (obj["aiTitle"] as? String) ?? state.ai; continue
             default: break
@@ -130,7 +136,7 @@ enum TranscriptIndexer {
             case "session":
                 state.cwd = state.cwd ?? obj["cwd"] as? String
             case "session_info":
-                if let name = obj["name"] as? String, !name.isEmpty { state.custom = name }
+                if let name = obj["name"] as? String, !name.isEmpty { state.custom = name; state.renamed = name }
             case "message":
                 guard let msg = obj["message"] as? [String: Any], let role = msg["role"] as? String,
                       role == "user" || role == "assistant" else { continue }
@@ -199,13 +205,59 @@ enum TranscriptIndexer {
             }
             guard consumed > 0 else { return }
             try SearchIndex.upsertSession(db: db, key: key, agent: isAgent, sessionId: sessionId, cwd: state.cwd,
-                                          custom: state.custom, ai: state.ai, firstPrompt: state.firstPrompt,
+                                          custom: state.custom, agentName: state.renamed, ai: state.ai,
+                                          firstPrompt: state.firstPrompt,
                                           created: state.created, updated: state.updated)
             try db.cached("INSERT INTO sources(path, session_key, offset, inode) VALUES (?, ?, ?, ?) ON CONFLICT(path) DO UPDATE SET offset = excluded.offset, inode = excluded.inode")
                 .bind(file.path, key, offset + consumed, inode).run()
         }
     }
 
+
+    // MARK: Agent names from before `title_agent`
+
+    private static let claudeRenameMarker = Data("\"type\":\"custom-title\"".utf8)
+    private static let piNameMarker = Data("\"type\":\"session_info\"".utf8)
+
+    /// Fills `title_agent` for transcripts indexed before the column existed. Only rename lines are
+    /// parsed; the rest is a byte scan, so this costs far less than indexing them again.
+    static func backfillAgentNames(db: SQLiteDB, chunkSize: Int = 4 << 20) throws {
+        var files: [(path: String, key: String)] = []
+        try db.prepare("SELECT path, session_key FROM sources WHERE session_key LIKE 'claude:%' OR session_key LIKE 'pi:%'")
+            .rows { if let p = $0.string(0), let k = $0.string(1) { files.append((p, k)) } }
+        for file in files {
+            try autoreleasepool {
+                let claude = file.key.hasPrefix("claude:")
+                guard let name = lastName(in: URL(fileURLWithPath: file.path), marker: claude ? claudeRenameMarker : piNameMarker,
+                                          field: claude ? "customTitle" : "name", chunkSize: chunkSize) else { return }
+                try db.cached("UPDATE sessions SET title_agent = ? WHERE key = ? AND title_agent IS NULL").bind(name, file.key).run()
+            }
+        }
+    }
+
+    /// The last non-empty `field` of the lines holding `marker`.
+    static func lastName(in file: URL, marker: Data, field: String, chunkSize: Int) -> String? {
+        guard let handle = try? FileHandle(forReadingFrom: file) else { return nil }
+        defer { try? handle.close() }
+        var name: String?
+        var carry = Data()
+        func scan(_ line: Data) {
+            guard line.range(of: marker) != nil,
+                  let obj = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
+                  let value = obj[field] as? String, !value.isEmpty else { return }
+            name = value
+        }
+        while let chunk = try? handle.read(upToCount: chunkSize), !chunk.isEmpty {
+            autoreleasepool {
+                carry.append(chunk)
+                guard let nl = carry.lastIndex(of: 0x0A) else { return }
+                carry[carry.startIndex..<nl].split(separator: 0x0A).forEach(scan)
+                carry = Data(carry[(nl + 1)...])
+            }
+        }
+        scan(carry)
+        return name
+    }
 
     // MARK: OpenCode (SQLite at ~/.local/share/opencode/opencode.db)
 

@@ -423,13 +423,20 @@ final class SearchPanelController: NSWindowController, NSTextFieldDelegate, NSTa
             ctx.duration = 0.10
             ctx.timingFunction = Motion.exit
             panel.animator().alphaValue = 0
-        }, completionHandler: { [weak self, weak panel] in
-            MainActor.assumeIsolated {
-                guard let self, let panel, gen == self.presentation else { return }
-                panel.orderOut(nil)
-                panel.alphaValue = 1
-            }
+        }, completionHandler: { [weak self] in
+            MainActor.assumeIsolated { self?.finishDismiss(gen) }
         })
+        // Core Animation stalls while the display sleeps, and the completion never comes: finish anyway.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+            MainActor.assumeIsolated { self?.finishDismiss(gen) }
+        }
+    }
+
+    /// Ends a fade-out unless the panel was presented again since (or it already ended).
+    private func finishDismiss(_ gen: Int) {
+        guard let panel = window, gen == presentation, panel.isVisible else { return }
+        panel.orderOut(nil)
+        panel.alphaValue = 1
     }
 
     /// Cancels a fade-out in flight: its completion sees a newer presentation and leaves the panel up.

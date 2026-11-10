@@ -6,6 +6,7 @@
 #   scripts/bundle.sh --release  for GitHub releases (scripts/release.sh notarizes it): committed source
 #                                only, Developer ID + secure timestamp required, notices checked, debug
 #                                symbols stripped, leak scan before signing
+#   CORRAL_DIST=dir ...          output folder instead of dist/ (leaves a dist/Corral.app that runs alone)
 # Every build carries the update feed (GitHub Releases) and Sparkle's EdDSA public key; updates always
 # ask before installing.
 set -euo pipefail
@@ -68,7 +69,9 @@ if ! swift build -c release --manifest-cache none --product Corral >"$LOG" 2>&1 
 fi
 BIN=$(swift build -c release --manifest-cache none --show-bin-path)
 
-APP=dist/Corral.app
+DIST=${CORRAL_DIST:-dist}
+APP=$DIST/Corral.app
+mkdir -p "$DIST"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Frameworks"
 cp "$BIN/Corral" "$APP/Contents/MacOS/Corral"
@@ -140,9 +143,9 @@ if [[ $RELEASE == 1 ]]; then
     # Every library family the binary links has a notice, and nothing LGPL or Sentry slipped in (a
     # vendor/ghostty-out from before the build options changed). Needs the symbols, so before stripping.
     scripts/notices.py --check "$APP/Contents/MacOS/Corral"
-    # Debug symbols hold this Mac's absolute source and object paths: kept in dist/ for crash reports.
-    rm -rf "dist/Corral-$VERSION.dSYM"
-    dsymutil "$APP/Contents/MacOS/Corral" -o "dist/Corral-$VERSION.dSYM" 2>/dev/null || true
+    # Debug symbols hold this Mac's absolute source and object paths: kept in $DIST for crash reports.
+    rm -rf "$DIST/Corral-$VERSION.dSYM"
+    dsymutil "$APP/Contents/MacOS/Corral" -o "$DIST/Corral-$VERSION.dSYM" 2>/dev/null || true
     strip -S -x "$APP/Contents/MacOS/Corral" "$APP/Contents/MacOS/corral-hook"
     # Before signing: the Developer ID certificate in the signature carries the developer's name.
     scripts/leak-scan.py "$APP"

@@ -70,6 +70,9 @@ public struct SessionRecord: Codable, Identifiable, Equatable, Sendable {
     public var id: UUID
     /// Name the user gave the session; wins over everything else.
     public var customName: String?
+    /// Name set inside the agent (Claude's /rename, PI's session name); below `customName`. "" once
+    /// synced while the conversation has none, nil before (`Workspace.setAgentName`).
+    public var agentName: String?
     /// Latest title reported by the agent or terminal.
     public var autoTitle: String
     public var cwd: String
@@ -101,8 +104,20 @@ public struct SessionRecord: Codable, Identifiable, Equatable, Sendable {
         self.lastActiveAt = now
     }
 
-    public var displayTitle: String {
+    /// The search index's key for the agent conversation (Claude, OpenCode: session id; PI: session file).
+    public var searchKey: String? {
+        agentSessionId.map { "\(agent.rawValue):\($0)" }
+    }
+
+    /// A name someone picked: the user's in Corral, else the one given inside the agent.
+    public var givenName: String? {
         if let customName, !customName.isEmpty { return customName }
+        if let agentName, !agentName.isEmpty { return agentName }
+        return nil
+    }
+
+    public var displayTitle: String {
+        if let givenName { return givenName }
         if !autoTitle.isEmpty { return autoTitle }
         return cwd.pathLeaf
     }

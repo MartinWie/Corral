@@ -50,7 +50,8 @@ image metadata) or build output. `scripts/leak-scan.py` checks shipped files; ex
   --account corral` → `dist/appcast.xml` (one item) → `gh release create` with DMG, zip, appcast.
   Feed: `releases/latest/download/appcast.xml` (latest non-prerelease). Build number = commit count,
   so it only grows on main. Notary credentials: `APPLE_ID`/`TEAM_ID`/`NOTARY_PASSWORD` env, else a
-  notarytool keychain profile (`CORRAL_NOTARY_PROFILE`).
+  notarytool keychain profile (`CORRAL_NOTARY_PROFILE`). `CORRAL_DIST=<dir>` builds there instead of
+  `dist/` (bundle.sh starts with `rm -rf` of the app: never under a running `dist/Corral.app`).
 - Sparkle EdDSA private key: login keychain, account `corral` (not Desko's default `ed25519`); back up
   with `generate_keys --account corral -x <file>`. Public key: `Resources/app/sparkle-public-key`.
   Tools: `scripts/sparkle-tools.sh` (downloads the version in Package.resolved, checksum pinned there).
@@ -161,7 +162,19 @@ image metadata) or build output. `scripts/leak-scan.py` checks shipped files; ex
   lazily, never at launch.
 - Keep awake (`SessionManager.updateKeepAwake`) is event-driven like status: re-evaluated on every
   status/background/structure emit, holds one IOKit idle-sleep assertion while an agent session is
-  `.working` or a background job is; tests swap `ManagerEnvironment.power` for a fake.
+  `.working` or a background job is; tests swap `ManagerEnvironment.power` for a fake. "Keep the
+  display on too" makes it a display-sleep assertion (that also blocks idle sleep); a type can't be
+  changed, so toggling it while held releases and takes a new one.
+- Agent names (Claude's `/rename` writes `custom-title` to the transcript, PI's session name; not
+  Claude's `agent-name`, which it writes on its own from the AI title): the index keeps them in
+  `sessions.title_agent`, apart from `title_custom` (which Corral's own rename also writes). After every
+  index refresh `SessionManager.syncAgentNames` copies them to `SessionRecord.agentName` via
+  `Workspace.setAgentName`: shown below `customName`. The first sync only records the conversation's
+  name ("" for none, nil = not synced; a new conversation id resets it to nil); a change after that is
+  a rename inside the agent and clears `customName` (the latest rename wins). Claude rewrites the same
+  name every turn: no change. Indexes from before the column get it filled once
+  (`TranscriptIndexer.backfillAgentNames`, meta flag `agent_names`) before the first refresh, so that
+  first sync sees names given earlier.
 - Settings rows: a wrapping caption must get its width from constraints (row/page), never from its
   text, and never set `preferredMaxLayoutWidth` during layout (the window then loops on constraint
   passes and AppKit throws). Scroll views must start below the transparent titlebar (else macOS 26

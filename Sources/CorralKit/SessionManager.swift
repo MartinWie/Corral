@@ -32,25 +32,27 @@ enum ManagerChange {
     case reveal(UUID)
 }
 
-/// An IOKit "prevent idle system sleep" assertion, like `caffeinate -i`: the display may still sleep,
-/// and closing the lid still sleeps the Mac. It times out on its own (`acquire`'s timeout, pushed out
-/// again by `rearm`), so a status that wrongly stays "working" can't keep the Mac up for good.
+/// An IOKit idle-sleep assertion: `display` false is `caffeinate -i` (the display may still sleep and
+/// lock), true is `caffeinate -d` (display stays on, which also keeps the system up). Closing the lid
+/// still sleeps the Mac. It times out on its own (`acquire`'s timeout, pushed out again by `rearm`),
+/// so a status that wrongly stays "working" can't keep the Mac up for good.
 public struct PowerAssertion {
-    public var acquire: (_ reason: String, _ timeout: TimeInterval) -> UInt32?
+    public var acquire: (_ reason: String, _ display: Bool, _ timeout: TimeInterval) -> UInt32?
     /// Restarts the timeout; false when the assertion is gone (it timed out).
     public var rearm: (_ id: UInt32, _ timeout: TimeInterval) -> Bool
     public var release: (UInt32) -> Void
 
-    public init(acquire: @escaping (String, TimeInterval) -> UInt32?, rearm: @escaping (UInt32, TimeInterval) -> Bool,
+    public init(acquire: @escaping (String, Bool, TimeInterval) -> UInt32?, rearm: @escaping (UInt32, TimeInterval) -> Bool,
                 release: @escaping (UInt32) -> Void) {
         self.acquire = acquire
         self.rearm = rearm
         self.release = release
     }
 
-    public static let system = PowerAssertion(acquire: { reason, timeout in
+    public static let system = PowerAssertion(acquire: { reason, display, timeout in
         let props: [String: Any] = [
-            kIOPMAssertionTypeKey: kIOPMAssertionTypePreventUserIdleSystemSleep,
+            kIOPMAssertionTypeKey: display ? kIOPMAssertionTypePreventUserIdleDisplaySleep
+                : kIOPMAssertionTypePreventUserIdleSystemSleep,
             kIOPMAssertionLevelKey: IOPMAssertionLevel(kIOPMAssertionLevelOn),
             kIOPMAssertionNameKey: reason,
             kIOPMAssertionTimeoutKey: timeout,
@@ -262,6 +264,8 @@ final class SessionManager: TerminalActionHandler {
     static let keepAwakeRearm: TimeInterval = 60
     static let keepAwakeReason = "Corral: agents are working"
     private var awakeAssertion: UInt32?
+    /// Whether `awakeAssertion` keeps the display on.
+    private var awakeDisplay = false
     private var awakeArmedAt = -TimeInterval.infinity
     private var awakeFailedAt = -TimeInterval.infinity
     var isKeepingAwake: Bool { awakeAssertion != nil }
@@ -309,27 +313,39 @@ final class SessionManager: TerminalActionHandler {
         emit(.settings)
     }
 
+    func setKeepDisplayOn(_ on: Bool) {
+        guard workspace.settings.keepDisplayOn != on else { return }
+        workspace.settings.keepDisplayOn = on
+        scheduleSave()
+        emit(.settings)
+    }
+
     /// Holds the assertion while the setting is on and some agent works. Event-driven: runs on every
     /// status, background, structure and settings change, never on a timer.
     private func updateKeepAwake() {
         guard workspace.settings.keepAwake || awakeAssertion != nil else { return }
         let want = workspace.settings.keepAwake && !terminating && hasWorkingAgent
+        let display = workspace.settings.keepDisplayOn
         let now = env.uptime()
-        if !want {
-            if let id = awakeAssertion { env.power.release(id) }
+        // Off, or the display setting changed (IOKit can't change an assertion's type): let go.
+        if let id = awakeAssertion, !want || awakeDisplay != display {
+            env.power.release(id)
             awakeAssertion = nil
-        } else if let id = awakeAssertion {
+        }
+        guard want else { return }
+        if let id = awakeAssertion {
             guard now - awakeArmedAt >= Self.keepAwakeRearm else { return }
             awakeArmedAt = now
             // Gone (timed out after a quiet stretch): work is back, take a new one.
             if !env.power.rearm(id, Self.keepAwakeTimeout) {
-                awakeAssertion = env.power.acquire(Self.keepAwakeReason, Self.keepAwakeTimeout)
+                awakeAssertion = env.power.acquire(Self.keepAwakeReason, display, Self.keepAwakeTimeout)
             }
         } else if now - awakeFailedAt >= Self.keepAwakeRearm {
-            awakeAssertion = env.power.acquire(Self.keepAwakeReason, Self.keepAwakeTimeout)
+            awakeAssertion = env.power.acquire(Self.keepAwakeReason, display, Self.keepAwakeTimeout)
             awakeArmedAt = now
             if awakeAssertion == nil { awakeFailedAt = now }
         }
+        awakeDisplay = display
     }
 
     /// Agents set up on this Mac whose status hooks are missing (the sidebar banner offers them).
@@ -369,6 +385,7 @@ final class SessionManager: TerminalActionHandler {
             staleScrollback.forEach(index.removeSession(key:))
             staleScrollback = []
             recoverSessionIds()
+            index.onIndexed = { [weak self] in self?.syncAgentNames() }
             index.refresh(roots: env.roots)
         } catch {
             NSLog("Corral: search index unavailable: \(error)")
@@ -604,6 +621,31 @@ final class SessionManager: TerminalActionHandler {
         }
     }
 
+    /// Names given inside the agents (Claude's /rename, PI's session name) follow into the sidebar: the
+    /// rename lands in the transcript, FSEvents re-index it, this runs after every refresh.
+    func syncAgentNames(completion: (() -> Void)? = nil) {
+        var ids: [String: [UUID]] = [:]
+        for (id, r) in workspace.sessions where r.agent == .claude || r.agent == .pi {
+            if let key = r.searchKey { ids[key, default: []].append(id) }
+        }
+        guard !ids.isEmpty else { completion?(); return }
+        index.agentNames(keys: Set(ids.keys)) { [weak self] names in
+            guard let self, let names else { completion?(); return }
+            var changed = false
+            for (key, name) in names {
+                // A record may have moved to another conversation meanwhile.
+                for id in ids[key] ?? [] where self.workspace.sessions[id]?.searchKey == key {
+                    if self.workspace.setAgentName(name, for: id) { changed = true }
+                }
+            }
+            if changed {
+                self.emit(.structure)
+                self.scheduleSave()
+            }
+            completion?()
+        }
+    }
+
     /// What a restored or reopened session runs: its resume command, or for a Claude session that never
     /// wrote its conversation (opened, nothing typed) a fresh start under the same id, since resuming
     /// it would only print "No conversation found".
@@ -779,7 +821,7 @@ final class SessionManager: TerminalActionHandler {
         } else if var r = workspace.sessions[id] {
             r.customName = trimmed.isEmpty ? nil : trimmed
             workspace.sessions[id] = r
-            if let sid = r.agentSessionId { index.setCustomTitle(key: "\(r.agent.rawValue):\(sid)", title: r.customName) }
+            if let key = r.searchKey { index.setCustomTitle(key: key, title: r.customName) }
         }
         emit(.structure)
         scheduleSave()
@@ -960,10 +1002,14 @@ final class SessionManager: TerminalActionHandler {
             // A plain shell turning into an agent session: its shell-era title (the command line that
             // started the agent) doesn't name it; the agent's own title or the directory does.
             if r.agent == .shell { r.autoTitle = "" }
-            if r.agent != s.agent { r.agentSessionId = nil; r.agentCwd = nil; r.bgJobId = nil }
+            if r.agent != s.agent { r.agentSessionId = nil; r.agentCwd = nil; r.bgJobId = nil; r.agentName = nil }
             r.agent = s.agent
             r.agentRunning = s.activity != .exited
-            if let sid = s.agentSessionId { r.agentSessionId = sid }
+            if let sid = s.agentSessionId, sid != r.agentSessionId {
+                // Another conversation (/clear, /resume): its name is its own, synced afresh.
+                r.agentSessionId = sid
+                r.agentName = nil
+            }
             if let dir = s.agentCwd { r.agentCwd = dir }
         } else {
             r.agentRunning = false

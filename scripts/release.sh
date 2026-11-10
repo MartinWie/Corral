@@ -3,6 +3,7 @@
 # update to (Sparkle, after asking), and appcast.xml.
 #   scripts/release.sh          notes from release-notes/<version>.md (Markdown: "- " lines and paragraphs)
 #   CORRAL_SKIP_TESTS=1 ...     when the suite just ran on this commit
+#   CORRAL_DIST=dir ...         build into dir instead of dist/ (e.g. while dist/Corral.app runs)
 # Notarization: APPLE_ID + TEAM_ID + NOTARY_PASSWORD (app-specific password) in the environment, else the
 # notarytool keychain profile CORRAL_NOTARY_PROFILE (default corral-notary).
 # The feed is releases/latest/download/appcast.xml, so each release carries the appcast for itself.
@@ -60,13 +61,15 @@ staple() {
     xcrun stapler staple "$1"
 }
 
-mkdir -p dist
+DIST=${CORRAL_DIST:-dist}
+export CORRAL_DIST=$DIST
+mkdir -p "$DIST"
 if [[ "${CORRAL_SKIP_TESTS:-}" != 1 ]]; then
-    scripts/test.sh >dist/release-tests.log 2>&1 || { echo "Tests failed: dist/release-tests.log" >&2; exit 1; }
+    scripts/test.sh >"$DIST/release-tests.log" 2>&1 || { echo "Tests failed: $DIST/release-tests.log" >&2; exit 1; }
 fi
 # Developer ID, hardened runtime, timestamp; leak-scanned before signing.
 scripts/bundle.sh --release
-APP=dist/Corral.app
+APP=$DIST/Corral.app
 IDENTITY=$(codesign -dvv "$APP" 2>&1 | sed -n 's/^Authority=\(Developer ID Application: .*\)$/\1/p')
 [[ -n "$IDENTITY" ]] || { echo "$APP isn't signed with a Developer ID." >&2; exit 1; }
 
@@ -79,14 +82,14 @@ staple "$APP"
 spctl -a -t exec "$APP"
 
 # Sparkle's archive. No extended attributes (provenance, quarantine); the signature uses none.
-ZIP=dist/Corral-$VERSION.zip
+ZIP=$DIST/Corral-$VERSION.zip
 rm -f "$ZIP"
 ditto -c -k --norsrc --noextattr --keepParent "$APP" "$ZIP"
 ditto -x -k "$ZIP" "$WORK/check"
 codesign --verify --strict --deep "$WORK/check/Corral.app"
 
 # First installs: drag Corral onto Applications.
-DMG=dist/Corral-$VERSION.dmg
+DMG=$DIST/Corral-$VERSION.dmg
 mkdir "$WORK/dmg"
 ditto "$APP" "$WORK/dmg/Corral.app"
 ln -s /Applications "$WORK/dmg/Applications"
@@ -102,7 +105,7 @@ case "$SIGNATURE" in ''|*[[:space:]]*|*\"*) echo "Unexpected sign_update output:
 
 plist() { /usr/libexec/PlistBuddy -c "Print :$1" "$APP/Contents/Info.plist"; }
 python3 -I - "$VERSION" "$(plist CFBundleVersion)" "$(plist LSMinimumSystemVersion)" "$(stat -f %z "$ZIP")" \
-    "$SIGNATURE" "$REPO" "$NOTES" >dist/appcast.xml <<'PY'
+    "$SIGNATURE" "$REPO" "$NOTES" >"$DIST/appcast.xml" <<'PY'
 import email.utils, html, sys
 version, build, minimum, length, signature, repo, notes = sys.argv[1:]
 body, items = [], []
@@ -137,9 +140,9 @@ print(f"""<?xml version="1.0" encoding="utf-8"?>
   </channel>
 </rss>""")
 PY
-scripts/leak-scan.py --skip-xattrs dist/appcast.xml
+scripts/leak-scan.py --skip-xattrs "$DIST/appcast.xml"
 
-gh release create "$TAG" "$DMG" "$ZIP" dist/appcast.xml -R "$REPO" --target "$(git rev-parse HEAD)" \
+gh release create "$TAG" "$DMG" "$ZIP" "$DIST/appcast.xml" -R "$REPO" --target "$(git rev-parse HEAD)" \
     --title "Corral $VERSION" --notes-file "$NOTES"
 git fetch -q origin --tags
 echo "Released $TAG: https://github.com/$REPO/releases/tag/$TAG"

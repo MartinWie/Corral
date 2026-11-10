@@ -157,6 +157,27 @@ struct WorkspaceTests {
         #expect(loaded.selected == r.id)
     }
 
+    /// Claude's /rename: the first sync only records the conversation's name (the user's stays); a
+    /// rename after that beats the user's own.
+    @Test func agentNameFollowsTheLatestRename() {
+        var ws = Workspace()
+        var named = SessionRecord(cwd: "/repo", agent: .claude, title: "Thumbs", agentSessionId: "s1")
+        named.customName = "Mine"
+        var older = SessionRecord(cwd: "/repo", agent: .claude, title: "Thumbs", agentSessionId: "s2")
+        older.customName = "Also mine"
+        ws.addSession(named)
+        ws.addSession(older)
+        let baseline = ws.setAgentName("", for: named.id), firstSeen = ws.setAgentName("Old name", for: older.id)
+        #expect(baseline && firstSeen)
+        #expect(ws.sessions[named.id]?.displayTitle == "Mine" && ws.sessions[older.id]?.displayTitle == "Also mine")
+        let renamed = ws.setAgentName("Thumb sizes", for: named.id)
+        #expect(renamed && ws.sessions[named.id]?.customName == nil && ws.sessions[named.id]?.displayTitle == "Thumb sizes")
+        // Claude writes the name again every turn: no change.
+        ws.sessions[named.id]?.customName = "Mine again"
+        let again = ws.setAgentName("Thumb sizes", for: named.id), unknown = ws.setAgentName("Other", for: UUID())
+        #expect(!again && !unknown && ws.sessions[named.id]?.displayTitle == "Mine again")
+    }
+
     @Test func corruptStateIsKeptAside() throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)

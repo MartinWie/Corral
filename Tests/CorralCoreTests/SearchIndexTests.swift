@@ -128,6 +128,72 @@ struct SearchIndexTests {
         #expect(try search(f, "flaky")[0].title == "Library flaky test")
     }
 
+    func agentNames(_ index: SearchIndex, _ keys: Set<String>) async -> [String: String]? {
+        index.queue.sync {}
+        return await withCheckedContinuation { c in index.agentNames(keys: keys) { c.resume(returning: $0) } }
+    }
+
+    /// The agent's own name (Claude's /rename) is kept apart from Corral's rename and follows new renames.
+    @Test func agentNamesComeFromTranscripts() async throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.dir) }
+        let file = try writeClaude(f, sid: "s1", lines: claudeLines)
+        // Claude writes `agent-name` on its own (from the AI title): not a rename.
+        _ = try writeClaude(f, sid: "s2", lines: [claudeLines[1], line(["type": "agent-name", "agentName": "Thumbs", "sessionId": "s2"])])
+        await refresh(f, [.claude])
+        f.index.setCustomTitle(key: "claude:s1", title: "Library thumbs")
+        // Unnamed conversations read "", unindexed ones are left out.
+        #expect(await agentNames(f.index, ["claude:s1", "claude:s2", "claude:none"]) == ["claude:s1": "Fix thumb sizes", "claude:s2": ""])
+        let h = try FileHandle(forWritingTo: file)
+        try h.seekToEnd()
+        try h.write(contentsOf: Data(line(["type": "custom-title", "customTitle": "HEIC thumbs", "sessionId": "s1"]).utf8))
+        try h.close()
+        await refresh(f, [.claude])
+        #expect(await agentNames(f.index, ["claude:s1"]) == ["claude:s1": "HEIC thumbs"])
+    }
+
+    /// Indexes from before agent names gain the column, filled from the transcripts they already read.
+    @Test func olderIndexBackfillsAgentNames() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let claude = dir.appendingPathComponent("c.jsonl"), pi = dir.appendingPathComponent("p.jsonl")
+        try Data((claudeLines + [line(["type": "custom-title", "customTitle": "HEIC thumbs", "sessionId": "s1"]),
+                                 line(["type": "agent-name", "agentName": "Later auto name", "sessionId": "s1"])]).joined().utf8)
+            .write(to: claude)
+        try Data([line(["type": "session_info", "name": "Garden beds"])].joined().utf8).write(to: pi)
+        let path = dir.appendingPathComponent("index.sqlite").path
+        try SQLiteDB(path: path).exec("""
+        CREATE TABLE sessions(key TEXT PRIMARY KEY, agent TEXT, session_id TEXT, cwd TEXT,
+            title_custom TEXT, title_ai TEXT, first_prompt TEXT, created REAL, updated REAL);
+        CREATE TABLE sources(path TEXT PRIMARY KEY, session_key TEXT, offset INTEGER, inode INTEGER);
+        INSERT INTO sessions(key, agent, session_id) VALUES ('claude:s1', 'claude', 's1'), ('pi:\(pi.path)', 'pi', '\(pi.path)'),
+            ('claude:s3', 'claude', 's3');
+        INSERT INTO sources(path, session_key, offset, inode) VALUES ('\(claude.path)', 'claude:s1', 1, 1),
+            ('\(pi.path)', 'pi:\(pi.path)', 1, 1), ('/gone.jsonl', 'claude:s3', 1, 1);
+        """)
+        let index = SearchIndex(path: path)
+        try index.open()
+        #expect(await agentNames(index, ["claude:s1", "pi:\(pi.path)", "claude:s3"])
+            == ["claude:s1": "HEIC thumbs", "pi:\(pi.path)": "Garden beds", "claude:s3": ""])
+        // Done once: the flag is gone, a reopen doesn't scan again.
+        var pending = false
+        try index.queue.sync { try #require(index.db).prepare("SELECT 1 FROM meta WHERE k = 'agent_names'").rows { _ in pending = true } }
+        #expect(!pending)
+    }
+
+    @Test func lastNameReadsAcrossChunks() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let file = dir.appendingPathComponent("c.jsonl")
+        try Data((claudeLines + [line(["type": "custom-title", "customTitle": "HEIC thumbs", "sessionId": "s1"])]).joined().utf8)
+            .write(to: file)
+        let marker = Data("\"type\":\"custom-title\"".utf8)
+        #expect(TranscriptIndexer.lastName(in: file, marker: marker, field: "customTitle", chunkSize: 7) == "HEIC thumbs")
+        #expect(TranscriptIndexer.lastName(in: dir.appendingPathComponent("none"), marker: marker, field: "customTitle", chunkSize: 7) == nil)
+    }
+
     @Test func indexesOpenCodeDatabase() async throws {
         let f = try fixture()
         defer { try? FileManager.default.removeItem(at: f.dir) }

@@ -75,12 +75,33 @@ public final class SearchIndex {
             CREATE TABLE IF NOT EXISTS sessions(
                 key TEXT PRIMARY KEY, agent TEXT, session_id TEXT, cwd TEXT,
                 title_custom TEXT, title_ai TEXT, first_prompt TEXT,
-                created REAL, updated REAL);
+                created REAL, updated REAL, title_agent TEXT);
             CREATE TABLE IF NOT EXISTS doc_map(id INTEGER PRIMARY KEY, session_key TEXT NOT NULL, role TEXT, ts REAL);
             CREATE INDEX IF NOT EXISTS doc_map_session ON doc_map(session_key, role);
             CREATE VIRTUAL TABLE IF NOT EXISTS docs USING fts5(text, tokenize='unicode61 remove_diacritics 2');
             """)
+            var hasAgentTitle = false
+            try db.prepare("PRAGMA table_info(sessions)").rows { if $0.string(1) == "title_agent" { hasAgentTitle = true } }
+            if !hasAgentTitle {
+                try db.transaction {
+                    try db.exec("ALTER TABLE sessions ADD COLUMN title_agent TEXT")
+                    try db.exec("INSERT OR REPLACE INTO meta(k, v) VALUES ('agent_names', 'backfill')")
+                }
+            }
             self.db = db
+        }
+        // Before any refresh (same serial queue), so the first name sync sees every conversation's name.
+        queue.async { [weak self] in
+            guard let db = self?.db else { return }
+            var pending = false
+            try? db.prepare("SELECT 1 FROM meta WHERE k = 'agent_names'").rows { _ in pending = true }
+            guard pending else { return }
+            do {
+                try TranscriptIndexer.backfillAgentNames(db: db)
+                try db.exec("DELETE FROM meta WHERE k = 'agent_names'")
+            } catch {
+                NSLog("Corral index: agent names: \(error)")
+            }
         }
         try readQueue.sync {
             readDB = try SQLiteDB(path: path)
@@ -120,7 +141,10 @@ public final class SearchIndex {
     public func refresh(_ sources: Set<Source> = [.claude, .opencode, .pi], roots: Roots = .standard,
                         completion: (() -> Void)? = nil) {
         queue.async { [weak self] in
-            guard let self, let db = self.db else { return }
+            guard let self, let db = self.db else {
+                DispatchQueue.main.async { completion?() }
+                return
+            }
             do {
                 if sources.contains(.claude) { try TranscriptIndexer.indexClaude(db: db, root: roots.claudeProjects, chunkSize: self.chunkSize) }
                 if sources.contains(.opencode) { try TranscriptIndexer.indexOpenCode(db: db, dbURL: roots.opencodeDB) }
@@ -171,6 +195,23 @@ public final class SearchIndex {
                     try Self.insertDoc(db: db, key: key, role: "name", ts: Date().timeIntervalSince1970, text: title)
                 }
             }
+        }
+    }
+
+    /// Names set inside the agents (`title_agent`: the transcript's own, never Corral's rename) for the
+    /// indexed ones of these keys, "" where the conversation has none; nil when the index can't be read.
+    /// Completion on main.
+    public func agentNames(keys: Set<String>, completion: @escaping ([String: String]?) -> Void) {
+        readQueue.async { [weak self] in
+            var names: [String: String]? = nil
+            if let db = self?.readDB, !keys.isEmpty {
+                var found: [String: String] = [:]
+                let placeholders = Array(repeating: "?", count: keys.count).joined(separator: ",")
+                let ok: ()? = try? db.prepare("SELECT key, COALESCE(title_agent, '') FROM sessions WHERE key IN (\(placeholders))")
+                    .bindAll(Array(keys)).rows { row in if let key = row.string(0) { found[key] = row.string(1) ?? "" } }
+                if ok != nil { names = found }
+            }
+            DispatchQueue.main.async { completion(names) }
         }
     }
 
@@ -562,19 +603,20 @@ public final class SearchIndex {
     }
 
     static func upsertSession(db: SQLiteDB, key: String, agent: AgentKind, sessionId: String, cwd: String?,
-                              custom: String?, ai: String?, firstPrompt: String?,
+                              custom: String?, agentName: String? = nil, ai: String?, firstPrompt: String?,
                               created: Double?, updated: Double?) throws {
         try db.cached("""
-        INSERT INTO sessions(key, agent, session_id, cwd, title_custom, title_ai, first_prompt, created, updated)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO sessions(key, agent, session_id, cwd, title_custom, title_agent, title_ai, first_prompt, created, updated)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(key) DO UPDATE SET
             cwd = COALESCE(sessions.cwd, excluded.cwd),
             title_custom = COALESCE(excluded.title_custom, sessions.title_custom),
+            title_agent = COALESCE(excluded.title_agent, sessions.title_agent),
             title_ai = COALESCE(excluded.title_ai, sessions.title_ai),
             first_prompt = COALESCE(sessions.first_prompt, excluded.first_prompt),
             created = MIN(COALESCE(sessions.created, excluded.created), COALESCE(excluded.created, sessions.created)),
             updated = MAX(COALESCE(sessions.updated, 0), COALESCE(excluded.updated, 0))
-        """).bind(key, agent.rawValue, sessionId, cwd, custom, ai, firstPrompt.map { String($0.prefix(200)) }, created, updated).run()
+        """).bind(key, agent.rawValue, sessionId, cwd, custom, agentName, ai, firstPrompt.map { String($0.prefix(200)) }, created, updated).run()
     }
 
     static func chunks(of text: String, size: Int) -> [String] {

@@ -51,6 +51,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     // General
     let keepAwakeSwitch = NSSwitch()
     private(set) var keepAwakeRow: SettingsRow!
+    let keepDisplaySwitch = NSSwitch()
+    private(set) var keepDisplayRow: SettingsRow!
     private(set) var searchRow: SettingsRow!
     let rebuildButton = NSButton(title: "Rebuild Now", target: nil, action: nil)
     let importButton = NSButton(title: "Import…", target: nil, action: #selector(AppDelegate.importFromTracker(_:)))
@@ -251,7 +253,13 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         keepAwakeSwitch.controlSize = .small
         keepAwakeSwitch.setAccessibilityLabel("Keep Mac awake while agents work")
         keepAwakeRow = SettingsRow(title: "Keep Mac awake while agents work", caption: "", accessory: keepAwakeSwitch)
-        page.addSection("Power", SettingsList([keepAwakeRow]))
+        keepDisplaySwitch.target = self
+        keepDisplaySwitch.action = #selector(keepDisplayChanged(_:))
+        keepDisplaySwitch.controlSize = .small
+        keepDisplaySwitch.setAccessibilityLabel("Keep the display on too")
+        keepDisplayRow = SettingsRow(title: "Keep the display on too", caption: Self.keepDisplayCaption,
+                                     accessory: keepDisplaySwitch)
+        page.addSection("Power", SettingsList([keepAwakeRow, keepDisplayRow]))
 
         button(rebuildButton, #selector(rebuildIndex(_:)))
         searchRow = SettingsRow(title: "Search index", caption: Self.searchCaption(), accessory: rebuildButton)
@@ -553,13 +561,18 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     }
 
     static let keepAwakeCaption = "Only while a session or background job is working, never while it waits for you. "
-        + "The display can still sleep, and closing the lid still sleeps the Mac."
+        + "Closing the lid still sleeps the Mac."
+    static let keepDisplayCaption = "No display sleep, screen saver or lock while an agent works."
 
     /// The switch, and while it holds the Mac awake, how many agents are working.
     func refreshKeepAwake() {
         let on = manager.workspace.settings.keepAwake
         let state: NSControl.StateValue = on ? .on : .off
         if keepAwakeSwitch.state != state { keepAwakeSwitch.state = state }
+        let display: NSControl.StateValue = manager.workspace.settings.keepDisplayOn ? .on : .off
+        if keepDisplaySwitch.state != display { keepDisplaySwitch.state = display }
+        keepDisplaySwitch.isEnabled = on
+        keepDisplayRow?.alphaValue = on ? 1 : Self.unavailableAlpha
         var caption = Self.keepAwakeCaption
         if on, manager.isKeepingAwake {
             let n = manager.workingAgents
@@ -630,6 +643,10 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 
     @objc func keepAwakeChanged(_ sender: NSSwitch) {
         manager.setKeepAwake(sender.state == .on)
+    }
+
+    @objc func keepDisplayChanged(_ sender: NSSwitch) {
+        manager.setKeepDisplayOn(sender.state == .on)
     }
 
     @objc func autoUpdateChanged(_ sender: NSSwitch) {

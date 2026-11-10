@@ -617,7 +617,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     }
 
     func displayTitle(_ r: SessionRecord, _ s: LiveStatus) -> String {
-        if let n = r.customName, !n.isEmpty { return n }
+        if let n = r.givenName { return n }
         if let t = s.title, !t.isEmpty, r.takesTerminalTitle(fromAgent: s.titleFromAgent) { return t }
         return r.displayTitle
     }

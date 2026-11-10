@@ -159,6 +159,51 @@ struct SessionNameTests {
         #expect(m.workspace.sessions[attached]?.displayTitle == "New mutual funds")
     }
 
+    /// Claude's /rename lands in the transcript; the index refresh carries it to the session's name, over
+    /// Claude's terminal title. The latest rename wins, Corral's or Claude's; another conversation drops it.
+    @Test func claudeRenameNamesTheSession() async throws {
+        let f = Fixture(start: true)
+        defer { f.cleanup() }
+        let m = f.manager!
+        m.newSession(agent: .claude, cwd: f.dir.path)
+        let id = try #require(f.selected)
+        let sid = try #require(m.workspace.sessions[id]?.agentSessionId)
+        _ = m.perform(.setTitle("✳ Thumbnail cache"), terminal: f.terminal(id)!)
+        let sidebar = SidebarViewController(manager: m)
+        func shown() -> String { sidebar.displayTitle(m.workspace.sessions[id]!, m.status(id) ?? LiveStatus()) }
+        f.transcripts(sid)
+        let file = f.env.roots.claudeProjects.appendingPathComponent("-test-project/\(sid).jsonl")
+        func sync() async {
+            await withCheckedContinuation { c in m.index.refresh([.claude], roots: f.env.roots) { c.resume() } }
+            await withCheckedContinuation { c in m.syncAgentNames { c.resume() } }
+        }
+        func rename(_ name: String, wait: Bool = true) async throws {
+            var line = try JSONSerialization.data(withJSONObject: ["type": "custom-title", "customTitle": name, "sessionId": sid])
+            line.append(0x0A)
+            let h = try FileHandle(forWritingTo: file)
+            try h.seekToEnd()
+            try h.write(contentsOf: line)
+            try h.close()
+            if wait { await sync() } else { m.index.refresh([.claude], roots: f.env.roots) }
+        }
+        #expect(shown() == "Thumbnail cache")
+        // Named in Corral first; the conversation has no name yet.
+        m.rename(id, to: "Mine")
+        await sync()
+        #expect(shown() == "Mine")
+        // Every index refresh syncs the names on its own.
+        try await rename("Thumb sizes", wait: false)
+        await waitUntil { shown() == "Thumb sizes" }
+        #expect(shown() == "Thumb sizes")
+        m.rename(id, to: "Mine again")
+        try await rename("Thumb sizes")
+        #expect(shown() == "Mine again")
+        try await rename("HEIC thumbs")
+        #expect(shown() == "HEIC thumbs" && m.workspace.sessions[id]?.displayTitle == "HEIC thumbs")
+        m.apply(.hook(HookEvent(agent: .claude, event: "SessionStart", sessionId: "other")), to: id)
+        #expect(m.workspace.sessions[id]?.agentSessionId == "other" && m.workspace.sessions[id]?.agentName == nil)
+    }
+
     /// Closed background sessions get their job's name from the job list; a name the user gave stays.
     @Test func lostBackgroundTitlesAreRepairedFromTheJob() throws {
         let f = Fixture()

@@ -98,9 +98,14 @@ struct SettingsPagesTests {
         let w = SettingsWindowController(manager: f.manager)
         #expect(w.keepAwakeSwitch.state == .off)
         #expect(w.keepAwakeRow.caption == SettingsWindowController.keepAwakeCaption)
+        #expect(!w.keepDisplaySwitch.isEnabled)
         w.keepAwakeSwitch.state = .on
         w.keepAwakeChanged(w.keepAwakeSwitch)
         #expect(f.manager.workspace.settings.keepAwake)
+        #expect(w.keepDisplaySwitch.isEnabled && w.keepDisplaySwitch.state == .off)
+        w.keepDisplaySwitch.state = .on
+        w.keepDisplayChanged(w.keepDisplaySwitch)
+        #expect(f.manager.workspace.settings.keepDisplayOn)
         f.manager.newSession(agent: .claude, cwd: f.dir.path)
         let id = try #require(f.selected)
         f.manager.apply(.hook(HookEvent(agent: .claude, event: "UserPromptSubmit")), to: id)
@@ -253,6 +258,27 @@ struct SettingsPagesTests {
 
     // MARK: Keep awake (manager)
 
+    /// "Keep the display on too" takes the display kind; switching it while held swaps the assertion.
+    @Test func keepDisplayOnSwapsTheAssertion() throws {
+        let f = Fixture()
+        defer { f.cleanup() }
+        let m = f.manager!
+        m.newSession(agent: .claude, cwd: f.dir.path)
+        let claude = try #require(f.selected)
+        m.setKeepAwake(true)
+        m.apply(.hook(HookEvent(agent: .claude, event: "UserPromptSubmit")), to: claude)
+        #expect(f.effects.awakeDisplay == [false])
+        m.setKeepDisplayOn(true)
+        m.setKeepDisplayOn(true)
+        #expect(f.effects.awakeReleased == [1] && f.effects.awakeDisplay == [false, true] && m.isKeepingAwake)
+        m.setKeepDisplayOn(false)
+        #expect(f.effects.awakeReleased == [1, 2] && f.effects.awakeDisplay == [false, true, false])
+        // Nothing working: the setting alone takes nothing.
+        m.apply(.hook(HookEvent(agent: .claude, event: "Stop")), to: claude)
+        m.setKeepDisplayOn(true)
+        #expect(!m.isKeepingAwake && f.effects.awakeReleased == [1, 2, 3] && f.effects.awakeDisplay.count == 3)
+    }
+
     @Test func keepAwakeHoldsOnlyWhileAnAgentWorks() throws {
         let f = Fixture()
         defer { f.cleanup() }
@@ -334,7 +360,7 @@ struct SettingsPagesTests {
 
     @Test func failedAssertionIsRetriedOnlyAfterAWhile() throws {
         var tries = 0
-        let f = Fixture { $0.power = PowerAssertion(acquire: { _, _ in tries += 1; return nil }, rearm: { _, _ in false }, release: { _ in }) }
+        let f = Fixture { $0.power = PowerAssertion(acquire: { _, _, _ in tries += 1; return nil }, rearm: { _, _ in false }, release: { _ in }) }
         defer { f.cleanup() }
         let m = f.manager!
         m.setKeepAwake(true)
@@ -401,14 +427,16 @@ struct SettingsPagesTests {
         let old = try JSONDecoder().decode(Workspace.self, from: Data("{\"version\":1}".utf8))
         #expect(old.settings == AppSettings())
         let partial = try JSONDecoder().decode(AppSettings.self, from: Data("{}".utf8))
-        #expect(!partial.keepAwake)
+        #expect(!partial.keepAwake && !partial.keepDisplayOn)
         #expect(AppSettings(keepAwake: true) != AppSettings())
     }
 
     @Test func systemPowerAssertionTakesRearmsAndReleases() throws {
-        let id = try #require(PowerAssertion.system.acquire("Corral test assertion", 30))
-        #expect(PowerAssertion.system.rearm(id, 30))
-        PowerAssertion.system.release(id)
-        #expect(!PowerAssertion.system.rearm(id, 30))
+        for display in [false, true] {
+            let id = try #require(PowerAssertion.system.acquire("Corral test assertion", display, 30))
+            #expect(PowerAssertion.system.rearm(id, 30))
+            PowerAssertion.system.release(id)
+            #expect(!PowerAssertion.system.rearm(id, 30))
+        }
     }
 }

@@ -243,6 +243,18 @@ public struct Workspace: Codable, Equatable, Sendable {
         return ids
     }
 
+    /// Takes the name the agent has for a session's conversation ("" for none). The first one only
+    /// records it (a name the user gave stays); a new name after that is a rename inside the agent
+    /// and replaces the user's own: the latest rename wins. Returns whether the record changed.
+    @discardableResult
+    public mutating func setAgentName(_ name: String, for id: UUID) -> Bool {
+        guard var r = sessions[id], r.agentName != name else { return false }
+        if r.agentName != nil, !name.isEmpty { r.customName = nil }
+        r.agentName = name
+        sessions[id] = r
+        return true
+    }
+
     /// Forgets a closed session entirely (transcripts on disk are untouched).
     public mutating func forget(_ id: UUID) {
         tree = Self.remove(id, from: tree).items
@@ -403,6 +415,8 @@ public enum CorralPaths {
 public struct AppSettings: Codable, Equatable, Sendable {
     /// Hold off idle sleep while an agent is working (not while it waits for the user).
     public var keepAwake = false
+    /// With `keepAwake`: the display stays on too (no display sleep, screen saver or lock).
+    public var keepDisplayOn = false
     public var notifications = NotificationSettings()
     /// Agents whose status hooks the user removed in Settings: the sidebar stops offering them.
     public var hooksRemoved: Set<AgentKind> = []
@@ -412,11 +426,12 @@ public struct AppSettings: Codable, Equatable, Sendable {
         self.notifications = notifications
     }
 
-    enum CodingKeys: String, CodingKey { case keepAwake, notifications, hooksRemoved }
+    enum CodingKeys: String, CodingKey { case keepAwake, keepDisplayOn, notifications, hooksRemoved }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         keepAwake = try c.decodeIfPresent(Bool.self, forKey: .keepAwake) ?? false
+        keepDisplayOn = try c.decodeIfPresent(Bool.self, forKey: .keepDisplayOn) ?? false
         notifications = (try? c.decodeIfPresent(NotificationSettings.self, forKey: .notifications)) ?? NotificationSettings()
         hooksRemoved = (try? c.decodeIfPresent(Set<AgentKind>.self, forKey: .hooksRemoved)) ?? []
     }

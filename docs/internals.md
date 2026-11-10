@@ -92,7 +92,8 @@ loads after it. ⌘/ (or the keyboard icon next to the sidebar counts) shows eve
 **Settings (⌘,).** A nav column and a card, like the main window:
 - *General*: keep the Mac awake while agents work (an idle-sleep assertion, like `caffeinate -i`,
   held only while a session runs an agent turn or a background job is active, never while one waits
-  for permission or input; the display can still sleep), rebuild the search index, and (when
+  for permission or input). Optionally the display stays on too (no display sleep, screen saver or
+  lock, like `caffeinate -d`). Rebuild the search index, and (when
   `claude-sessions` is installed) take over its sessions.
 - *Notifications*: on/off and sound per event (permission requests, questions, finished turns,
   errors, long shell commands) and whether they also come while Corral is in front. Never for the
@@ -138,7 +139,9 @@ mail links open, other schemes ask first, executables and links with hidden char
   `opencode -s` or `pi --session`. A plain terminal that never ran an agent is simply gone when
   closed, and so is a session whose conversation doesn't exist (a resume that printed "No
   conversation found"; checked against the transcript files, never when they can't be read). A session keeps its agent's name after the agent exits (the shell's directory titles
-  don't rename it); closed background sessions are named after their job.
+  don't rename it); closed background sessions are named after their job. Renaming inside the agent
+  (Claude's `/rename`, PI's session name) renames the session too, about 2 s later; whichever rename
+  came last, Corral's or the agent's, wins.
   Drag a closed session back into the tree to reopen it there.
 - On quit/relaunch every open session comes back; agents that were running are resumed (launched
   directly, see Terminal). The session on screen resumes first, the others two at a time (each

@@ -98,6 +98,8 @@ final class Effects {
     var active = true
     /// Keep-awake assertions taken (reasons) and released (ids).
     var awake: [String] = []
+    /// Per `awake` entry: whether it keeps the display on.
+    var awakeDisplay: [Bool] = []
     var awakeReleased: [UInt32] = []
     var awakeRearmed: [UInt32] = []
     /// Assertions the system already let go (timed out).
@@ -138,7 +140,11 @@ final class Fixture {
                                                  piExtensionDir: dir.appendingPathComponent("pi-ext")))
         let fx = effects
         env.openURL = { fx.opened.append($0) }
-        env.power = PowerAssertion(acquire: { reason, _ in fx.awake.append(reason); return UInt32(fx.awake.count) },
+        env.power = PowerAssertion(acquire: { reason, display, _ in
+                                       fx.awake.append(reason)
+                                       fx.awakeDisplay.append(display)
+                                       return UInt32(fx.awake.count)
+                                   },
                                    rearm: { id, _ in fx.awakeRearmed.append(id); return !fx.awakeLapsed.contains(id) },
                                    release: { fx.awakeReleased.append($0) })
         env.uptime = { fx.uptime }
