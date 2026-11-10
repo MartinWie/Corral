@@ -50,6 +50,16 @@ notarize() {
     fi
 }
 
+# Right after approval the ticket may not be fetchable yet: retry before failing (loudly).
+staple() {
+    local attempt
+    for attempt in 1 2 3 4 5 6; do
+        xcrun stapler staple -q "$1" && return 0
+        sleep 10
+    done
+    xcrun stapler staple "$1"
+}
+
 mkdir -p dist
 if [[ "${CORRAL_SKIP_TESTS:-}" != 1 ]]; then
     scripts/test.sh >dist/release-tests.log 2>&1 || { echo "Tests failed: dist/release-tests.log" >&2; exit 1; }
@@ -65,7 +75,7 @@ trap 'rm -rf "$WORK"' EXIT
 # ditto keeps the bundle's signature intact (a plain zip can break it: "Corral is damaged").
 ditto -c -k --keepParent "$APP" "$WORK/notarize.zip"
 notarize "$WORK/notarize.zip"
-xcrun stapler staple -q "$APP"
+staple "$APP"
 spctl -a -t exec "$APP"
 
 # Sparkle's archive. No extended attributes (provenance, quarantine); the signature uses none.
@@ -84,7 +94,7 @@ rm -f "$DMG"
 hdiutil create -quiet -volname Corral -srcfolder "$WORK/dmg" -fs HFS+ -format UDZO -ov "$DMG"
 codesign --force --timestamp --sign "$IDENTITY" "$DMG"
 notarize "$DMG"
-xcrun stapler staple -q "$DMG"
+staple "$DMG"
 spctl -a -t open --context context:primary-signature "$DMG"
 
 SIGNATURE=$("$SPARKLE_BIN/sign_update" --account corral -p "$ZIP")
