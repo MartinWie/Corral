@@ -54,6 +54,8 @@ final class TerminalView: NSView, NSTextInputClient, TerminalSurface {
         }
         if let surface { Self.registry[surface] = WeakView(self) }
         registerForDraggedTypes([.fileURL, .string])
+        NotificationCenter.default.addObserver(self, selector: #selector(windowDidChangeScreen(_:)),
+                                               name: NSWindow.didChangeScreenNotification, object: nil)
     }
 
     deinit {
@@ -162,6 +164,9 @@ final class TerminalView: NSView, NSTextInputClient, TerminalSurface {
 
     func setVisible(_ visible: Bool) {
         guard let surface else { return }
+        // A hidden surface gives up its frame and draws again only through the display link: bind
+        // it to the current display first (its id can change while hidden, e.g. after a lock).
+        if visible { updateDisplayID() }
         ghostty_surface_set_occlusion(surface, visible)
     }
 
@@ -191,12 +196,24 @@ final class TerminalView: NSView, NSTextInputClient, TerminalSurface {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        guard let window else { return }
-        if let surface, let screen = window.screen,
-           let id = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber {
-            ghostty_surface_set_display_id(surface, id.uint32Value)
-        }
+        guard window != nil else { return }
+        updateDisplayID()
         viewDidChangeBackingProperties()
+    }
+
+    /// The display link (vsync) follows the window's display. Bound to one that went away (sleep,
+    /// a monitor reconnecting), the terminal never draws again: Ghostty's SurfaceView does the same.
+    @objc private func windowDidChangeScreen(_ notification: Notification) {
+        guard let window, notification.object as? NSWindow === window else { return }
+        updateDisplayID()
+        // The new display may have another scale factor.
+        DispatchQueue.main.async { [weak self] in self?.viewDidChangeBackingProperties() }
+    }
+
+    private func updateDisplayID() {
+        guard let surface, let screen = window?.screen,
+              let id = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else { return }
+        ghostty_surface_set_display_id(surface, id.uint32Value)
     }
 
     override func viewDidChangeBackingProperties() {

@@ -130,6 +130,10 @@ image metadata) or build output. `scripts/leak-scan.py` checks shipped files; ex
 - `TerminalView` input handling mirrors Ghostty's `SurfaceView_AppKit.swift`
   (vendor/ghostty/macos/Sources/Ghostty/Surface View). When Ghostty changes key/IME handling,
   port from there instead of inventing.
+- Display id: libghostty's display link (vsync) is bound to a display, and a hidden surface
+  (`setVisible(false)`) releases its frame and draws again only through that link. `TerminalView`
+  re-sends the id on window screen changes (as Ghostty's SurfaceView) and whenever it becomes
+  visible; a link left on a display that went away keeps the terminal blank.
 - libghostty C strings in action callbacks are only valid during the callback; copy them in
   `GhosttyRuntime.map`.
 - Workspace (tree/records) is a value type; mutate through `Workspace` methods so tests cover it.
