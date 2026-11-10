@@ -151,6 +151,8 @@ final class Fixture {
                                 })
         env.agentPresent = { _, _ in true }
         env.agentInstalled = { _, _ in true }
+        // No real process tree: tests that need background commands set their own.
+        env.backgroundShells = { _ in [] }
         env.alert = { title, _ in fx.alerts.append(title) }
         env.setBadge = { fx.badges.append($0) }
         env.terminate = { fx.terminated += 1 }

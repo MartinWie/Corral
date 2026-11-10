@@ -141,6 +141,13 @@ public struct ManagerEnvironment {
     /// Sessions resumed at once at app start (after the selected one). Each `claude --resume` is a
     /// Node process replaying its transcript; all at once starve each other.
     public var restoreConcurrency = 2
+    /// Commands Claude still runs in the background under the agent process (tests fake them).
+    public var backgroundShells: (pid_t) -> [pid_t] = { ProcessInspector.claudeBackgroundShells(agent: $0) }
+    /// Reports a process's exit on main; releasing the returned object stops watching.
+    public var watchExit: (pid_t, @escaping () -> Void) -> AnyObject = { ProcessExitWatch(pid: $0, exited: $1) }
+    /// After the last background command ends, how long Claude gets to pick up before the session
+    /// reads as finished.
+    public var backgroundGrace: TimeInterval = 5
     /// Keeps the Mac from idle-sleeping (Settings › Keep awake). Tests swap in a fake.
     public var power: PowerAssertion = .system
     /// Seconds since boot (keep-awake re-arm throttle). Tests drive it.
@@ -501,6 +508,16 @@ final class SessionManager: TerminalActionHandler {
     /// Open sessions not started yet; they start a few at a time, or right away when selected.
     private(set) var pendingRestore: [UUID] = []
 
+    /// A Claude turn's end held back while its background commands run (`holdForBackground`).
+    struct BackgroundHold {
+        var end: HookEvent
+        /// Exit watches of the commands still running; released with the hold.
+        var watches: [AnyObject]
+        /// Set once they all ended: the pending "finished" after `backgroundGrace`.
+        var token: UUID?
+    }
+    private(set) var backgroundHolds: [UUID: BackgroundHold] = [:]
+
     func isPendingRestore(_ id: UUID) -> Bool { pendingRestore.contains(id) }
 
     /// Starts queued sessions: agent resumes while fewer than `restoreConcurrency` are launching,
@@ -646,6 +663,7 @@ final class SessionManager: TerminalActionHandler {
 
     func close(_ id: UUID) {
         pendingRestore.removeAll { $0 == id }
+        backgroundHolds[id] = nil
         if let ls = live[id] {
             syncRecord(id, from: ls.status)
             // Plain shells vanish on close (below); agent sessions keep their final screen searchable.
@@ -964,6 +982,12 @@ final class SessionManager: TerminalActionHandler {
         onHook?(msg)
         // An agent started in a split pane becomes a session of its own.
         if panes[msg.surface] != nil, msg.event.agent != .shell { promotePane(msg.surface, agent: msg.event.agent) }
+        if Self.endsTurn(msg.event), holdForBackground(msg.surface, end: msg.event) {
+            launchHint(msg.surface)
+            return
+        }
+        // Any other sign from the agent: it is back at work (or gone), the hold is over.
+        backgroundHolds[msg.surface] = nil
         apply(.hook(msg.event), to: msg.surface)
         // The exit report ends any launch; other hooks only a fresh start's.
         if msg.event.event == AgentLaunch.exitEvent { launchReady(msg.surface) } else { launchHint(msg.surface) }
@@ -986,6 +1010,46 @@ final class SessionManager: TerminalActionHandler {
         } else if live[id]?.status.activity == .needsInput, let c = event.characters, c.count == 1,
                   let d = c.first, d.isNumber || d == "y" || d == "n" {
             apply(.userSubmitted, to: id)
+        }
+    }
+
+    // MARK: Background commands
+
+    /// A Claude turn ending ("Stop", or the idle notice a minute later).
+    static func endsTurn(_ e: HookEvent) -> Bool {
+        e.agent == .claude && (e.event == "Stop" || (e.event == "Notification" && e.notificationType == "idle_prompt"))
+    }
+
+    /// A Claude turn that ends while commands it started still run in the background isn't finished:
+    /// Claude goes on by itself once they end. Until then the session reads as working and nothing is
+    /// announced; their exits are watched (kqueue). Returns false when nothing runs.
+    func holdForBackground(_ id: UUID, end: HookEvent) -> Bool {
+        guard let ls = live[id] else { return false }
+        let shells = env.backgroundShells(ls.terminal.foregroundPid)
+        guard !shells.isEmpty else {
+            backgroundHolds[id] = nil
+            return false
+        }
+        // Keep the first end: an idle notice later must not replace the Stop.
+        let end = backgroundHolds[id]?.end ?? end
+        backgroundHolds[id] = BackgroundHold(end: end, watches: shells.map { pid in
+            env.watchExit(pid) { [weak self] in self?.backgroundExited(id) }
+        })
+        apply(.backgroundCommands, to: id)
+        return true
+    }
+
+    /// One of the held session's background commands ended. When none is left and Claude stays quiet
+    /// for `backgroundGrace`, the turn's end applies after all.
+    private func backgroundExited(_ id: UUID) {
+        guard let hold = backgroundHolds[id] else { return }
+        if holdForBackground(id, end: hold.end) { return }
+        let token = UUID()
+        backgroundHolds[id] = BackgroundHold(end: hold.end, watches: [], token: token)
+        DispatchQueue.main.asyncAfter(deadline: .now() + env.backgroundGrace) { [weak self] in
+            guard let self, let hold = self.backgroundHolds[id], hold.token == token else { return }
+            self.backgroundHolds[id] = nil
+            self.apply(.hook(hold.end), to: id)
         }
     }
 

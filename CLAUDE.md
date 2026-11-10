@@ -81,6 +81,12 @@ image metadata) or build output. `scripts/leak-scan.py` checks shipped files; ex
   take the id of the only conversation with their title (`recoverSessionIds`).
 - ⌘W ("Close Session") with another window in front goes through `FrontWindow.close`: that window
   closes (panels without a close button cancel), a sheet beeps; never the session behind it.
+- Background commands: a Claude turn end (Stop, or the idle notice) while the agent process still has
+  children started from Claude's shell snapshot (`ProcessInspector.claudeBackgroundShells`: the Bash tool's
+  background commands; foreground ones end before the turn) is held: the session reads working
+  ("Background command"), nothing is announced, the exits are watched with kqueue (`ProcessExitWatch`, no
+  polling). Any other hook ends the hold; when the commands are gone and Claude stays quiet for
+  `backgroundGrace` the held end applies.
 - Removing hooks (Settings › Agents › Remove): `Integrations.uninstall*` take out only Corral's hook
   commands (settings.json backed up, unknown shapes refused) and only plugin files whose first line is
   Corral's. `AppSettings.hooksRemoved` keeps the sidebar banner from offering them again; installing

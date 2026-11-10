@@ -31,6 +31,22 @@ public enum ProcessInspector {
         return args
     }
 
+    /// Direct children of `pid`.
+    public static func children(of pid: pid_t) -> [pid_t] {
+        guard pid > 0 else { return [] }
+        var buf = [pid_t](repeating: 0, count: 256)
+        let bytes = proc_listpids(UInt32(PROC_PPID_ONLY), UInt32(pid), &buf, Int32(buf.count * MemoryLayout<pid_t>.size))
+        guard bytes > 0 else { return [] }
+        return buf.prefix(Int(bytes) / MemoryLayout<pid_t>.size).filter { $0 > 0 }
+    }
+
+    /// Commands Claude Code still runs in the background under the agent process `pid`: its Bash tool's
+    /// shells, started from Claude's shell snapshot. Foreground tool calls end before the turn does, so
+    /// any left when a turn ends run in the background (and Claude goes on once they finish).
+    public static func claudeBackgroundShells(agent pid: pid_t) -> [pid_t] {
+        children(of: pid).filter { child in arguments(pid: child).contains { $0.contains("/shell-snapshots/snapshot-") } }
+    }
+
     public static func agent(pid: pid_t) -> AgentKind? {
         guard pid > 0, let path = executablePath(pid: pid) else { return nil }
         return AgentDetector.detect(path: path, args: arguments(pid: pid))

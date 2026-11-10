@@ -55,6 +55,8 @@ public enum Signal: Equatable, Sendable {
     case viewed
     /// State of the Claude background job this session is attached to (`claude attach`).
     case backgroundJob(Activity, detail: String?)
+    /// The turn ended with commands still running in the background: Claude goes on once they end.
+    case backgroundCommands
 
     public enum ProgressState: Equatable, Sendable { case active, removed, error }
 }
@@ -207,6 +209,10 @@ public enum StatusReducer {
                 s.compactFrom = nil
             }
         case .viewed:
+            s.unread = false
+        case .backgroundCommands:
+            s.activity = .working
+            s.detail = "Background command"
             s.unread = false
         case .backgroundJob(let activity, let detail):
             guard !s.hooksSeen, s.activity != activity else { break }
