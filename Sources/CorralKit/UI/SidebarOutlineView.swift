@@ -139,6 +139,8 @@ final class SidebarOutlineView: NSOutlineView {
         indentationPerLevel = Self.margin
         rowSizeStyle = .custom
         floatsGroupRows = false
+        // Typing never jumps between sessions by name: it belongs to the selected session (`onTyping`).
+        allowsTypeSelect = false
         focusRingType = .none
         headerView = nil
         usesAutomaticRowHeights = false
@@ -232,6 +234,24 @@ final class SidebarOutlineView: NSOutlineView {
     }
 
     // MARK: Focus and key state
+
+    /// Text typed while the list has the keyboard; true when the selected session's terminal took it.
+    var onTyping: ((NSEvent) -> Bool)?
+
+    override func keyDown(with event: NSEvent) {
+        if Self.isTyping(event), onTyping?(event) == true { return }
+        super.keyDown(with: event)
+    }
+
+    /// Text, not a list key: no ⌘/⌃, no control characters (Return, Tab, Escape, Delete) and no
+    /// function keys (arrows, Home, Page Down…). Option may be part of it (@ on many layouts).
+    static func isTyping(_ event: NSEvent) -> Bool {
+        let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        guard mods.isDisjoint(with: [.command, .control]), let chars = event.characters, !chars.isEmpty else { return false }
+        return chars.unicodeScalars.allSatisfy {
+            !CharacterSet.controlCharacters.contains($0) && !(0xF700...0xF8FF).contains($0.value)
+        }
+    }
 
     override func becomeFirstResponder() -> Bool {
         let ok = super.becomeFirstResponder()

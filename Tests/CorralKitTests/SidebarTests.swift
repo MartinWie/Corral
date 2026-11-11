@@ -679,6 +679,46 @@ struct SidebarTests {
         #expect(s.outline.isItemExpanded(s.node(.folder(folder))))
     }
 
+    /// Typing while the list has the keyboard goes to the selected session's terminal, never jumps to a
+    /// session by name; list keys (arrows, Return, shortcuts) stay in the list.
+    @Test func typingInTheListGoesToTheSelectedSession() throws {
+        let (f, s, w) = makeWindowed()
+        defer { f.cleanup() }
+        f.manager.newSession(agent: .shell, cwd: f.dir.path)
+        f.manager.newSession(agent: .shell, cwd: f.dir.path)
+        settle(w)
+        final class Keys: NSView {
+            var typed: [String] = []
+            override var acceptsFirstResponder: Bool { true }
+            override func keyDown(with event: NSEvent) { typed.append(event.characters ?? "") }
+        }
+        final class Focus: SidebarDelegate {
+            let target: NSView
+            init(_ target: NSView) { self.target = target }
+            func sidebarShowClosed(_ id: UUID) {}
+            func sidebarShowBackground(_ agent: BackgroundAgent) {}
+            func sidebarFocusTerminal() { target.window?.makeFirstResponder(target) }
+        }
+        let terminal = Keys(frame: NSRect(x: 0, y: 0, width: 10, height: 10))
+        w.contentView?.addSubview(terminal)
+        let focus = Focus(terminal)
+        s.delegate = focus
+        let selected = try #require(f.selected)
+        w.makeFirstResponder(s.outline)
+        s.outline.keyDown(with: keyEvent(0, chars: "a"))
+        #expect(terminal.typed == ["a"] && w.firstResponder === terminal && f.selected == selected)
+        #expect(!s.outline.allowsTypeSelect)
+        #expect(SidebarOutlineView.isTyping(keyEvent(37, chars: "@", modifiers: .option)))
+        for (code, chars, mods) in [(126, "\u{F700}", NSEvent.ModifierFlags()), (36, "\r", []), (53, "\u{1B}", []),
+                                    (51, "\u{7F}", []), (0, "a", .command), (0, "a", .control)] {
+            #expect(!SidebarOutlineView.isTyping(keyEvent(UInt16(code), chars: chars, modifiers: mods)), "\(code)")
+        }
+        // Nothing typed lands anywhere without a session selected.
+        f.manager.select(nil)
+        w.makeFirstResponder(s.outline)
+        #expect(!s.typeIntoSession(keyEvent(0, chars: "b")))
+    }
+
     /// Group rows restyle a cell's `textField` outlet (system font and label color); the header keeps its own.
     @Test func hostedHeaderKeepsSectionStyle() {
         let (f, s, w) = makeWindowed()

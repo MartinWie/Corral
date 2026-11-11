@@ -127,6 +127,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         outline.target = self
         outline.action = #selector(rowClicked)
         outline.doubleAction = #selector(doubleClicked)
+        outline.onTyping = { [weak self] in self?.typeIntoSession($0) ?? false }
         outline.registerForDraggedTypes([Self.dragType])
         outline.setDraggingSourceOperationMask(.move, forLocal: true)
         outline.onKeyChange = { [weak self] key in if !key { self?.setCommandHeld(false) } }
@@ -1086,6 +1087,17 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         default:
             break
         }
+    }
+
+    /// A selected session wants what is typed, also while the list has the keyboard: its terminal
+    /// takes focus and the key.
+    func typeIntoSession(_ event: NSEvent) -> Bool {
+        guard let id = manager.workspace.selected, manager.live[id] != nil, outline.selectedRow >= 0,
+              (outline.item(atRow: outline.selectedRow) as? SidebarNode)?.kind == .session(id) else { return false }
+        delegate?.sidebarFocusTerminal()
+        guard let terminal = view.window?.firstResponder as? NSView, terminal !== outline else { return false }
+        terminal.keyDown(with: event)
+        return true
     }
 
     /// Single click: section headers toggle anywhere on the row (§3.8). A click on the selected session
