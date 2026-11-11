@@ -196,6 +196,10 @@ final class TerminalView: NSView, NSTextInputClient, TerminalSurface {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        // A first responder that leaves its window loses that status without resignFirstResponder
+        // (a split moves the terminal into its host that way): a stale `focused` would keep taking
+        // key equivalents (⌘V) meant for the pane being typed in.
+        setFocus(window?.firstResponder === self)
         guard window != nil else { return }
         updateDisplayID()
         viewDidChangeBackingProperties()
@@ -447,7 +451,7 @@ final class TerminalView: NSView, NSTextInputClient, TerminalSurface {
     }
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        guard event.type == .keyDown, focused, let surface else { return false }
+        guard event.type == .keyDown, focused, window?.firstResponder === self, let surface else { return false }
 
         var ghosttyEvent = Self.keyEvent(event, action: GHOSTTY_ACTION_PRESS)
         var flags = ghostty_binding_flags_e(rawValue: 0)
