@@ -164,10 +164,34 @@ final class TerminalView: NSView, NSTextInputClient, TerminalSurface {
 
     func setVisible(_ visible: Bool) {
         guard let surface else { return }
+        shown = visible
         // A hidden surface gives up its frame and draws again only through the display link: bind
         // it to the current display first (its id can change while hidden, e.g. after a lock).
         if visible { updateDisplayID() }
         ghostty_surface_set_occlusion(surface, visible)
+        if visible { scheduleShowDraws() }
+    }
+
+    /// Whether the container shows this terminal (`setVisible`).
+    private var shown = false
+
+    /// Becoming visible makes the render thread draw, but that frame can be lost: it waits for a vsync
+    /// tick, or is dropped for not matching the layer's size once layout has moved on. Nothing else
+    /// draws while the program prints nothing (an idle agent, a background command), and the hidden
+    /// surface gave up its old frame: a blank pane. So draw synchronously (presented on the spot) once
+    /// layout settled, and again once the render thread caught up with output from while hidden.
+    private func scheduleShowDraws() {
+        for delay in [0.0, 0.25] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                MainActor.assumeIsolated { self?.drawIfShown() }
+            }
+        }
+    }
+
+    private func drawIfShown() {
+        guard shown, let surface, window != nil, !isHiddenOrHasHiddenAncestor,
+              bounds.width > 0, bounds.height > 0 else { return }
+        ghostty_surface_draw(surface)
     }
 
     /// Types text as if pasted (used for drag and drop of paths).
