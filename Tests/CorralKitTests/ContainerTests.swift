@@ -63,6 +63,27 @@ struct ContainerTests {
         #expect(f.terminal(b)?.visibility.last == false)
         c.focusTerminal()
 
+        // The window covered (screen locked or asleep): the shown terminal stops drawing, and draws
+        // again when the window shows; a session switched to meanwhile waits for the window too.
+        c.setWindowVisible(false)
+        #expect(f.terminal(a)?.visibility.last == false)
+        let bSeen = f.terminal(b)?.visibility.count
+        f.manager.select(b)
+        c.showSelected(focus: false)
+        #expect(f.terminal(b)?.visibility.last == false)
+        c.setWindowVisible(true)
+        #expect(f.terminal(b)?.visibility.last == true && f.terminal(b)?.visibility.count == (bSeen ?? 0) + 2)
+        // Waking displays redraw the shown terminal from scratch; never while the window is covered.
+        let before = f.terminal(b)?.visibility.count ?? 0
+        c.redrawShownTerminals()
+        #expect(f.terminal(b)?.visibility.suffix(2) == [false, true] && f.terminal(b)?.visibility.count == before + 2)
+        c.setWindowVisible(false)
+        c.redrawShownTerminals()
+        #expect(f.terminal(b)?.visibility.last == false)
+        c.setWindowVisible(true)
+        f.manager.select(a)
+        c.showSelected(focus: false)
+
         f.manager.close(b)
         let record = f.manager.workspace.sessions[b]!
         c.showClosed(record)

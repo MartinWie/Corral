@@ -139,7 +139,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSPopove
 
     required init?(coder: NSCoder) { fatalError() }
 
-    deinit { NotificationCenter.default.removeObserver(self) }
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
+    }
 
     /// Native title and subtitle; written only when they change (status events are frequent and each
     /// write can relayout the titlebar).
@@ -172,6 +175,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSPopove
         nc.addObserver(self, selector: #selector(occlusionChanged), name: NSWindow.didChangeOcclusionStateNotification, object: window)
         nc.addObserver(self, selector: #selector(occlusionChanged), name: NSApplication.didHideNotification, object: nil)
         nc.addObserver(self, selector: #selector(occlusionChanged), name: NSApplication.didUnhideNotification, object: nil)
+        NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(screensDidWake),
+                                                          name: NSWorkspace.screensDidWakeNotification, object: nil)
         nc.addObserver(self, selector: #selector(splitResized), name: NSSplitView.didResizeSubviewsNotification, object: split.splitView)
         // "system" window-theme follows macOS light/dark.
         appearanceObservation = NSApp?.observe(\.effectiveAppearance, options: [.new]) { [weak self] _, _ in
@@ -250,8 +255,14 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSPopove
     @objc private func occlusionChanged(_ n: Notification) {
         MainActor.assumeIsolated {
             let hidden = n.name == NSApplication.didHideNotification || (NSApp?.isHidden ?? false)
-            setLoopsPaused(hidden || window?.occlusionState.contains(.visible) != true)
+            let visible = !hidden && window?.occlusionState.contains(.visible) == true
+            setLoopsPaused(!visible)
+            container.setWindowVisible(visible)
         }
+    }
+
+    @objc private func screensDidWake(_ n: Notification) {
+        MainActor.assumeIsolated { container.redrawShownTerminals() }
     }
 
     /// Removes (paused) or re-adds the status loops in the sidebar; the toolbar only drops one-shots.

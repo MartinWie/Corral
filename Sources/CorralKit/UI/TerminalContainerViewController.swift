@@ -19,6 +19,8 @@ final class TerminalContainerViewController: NSViewController {
     private(set) var shownSession: UUID?
     /// The card on screen: the shown session's, or the holder's when it shares one (side by side).
     private(set) var shownHost: UUID?
+    /// The window is on screen and not covered: shown terminals draw only then.
+    private(set) var windowVisible = true
     /// Split cards (panes, sessions side by side) by holder: nested split views shown instead of the
     /// holder's terminal view; the other sessions' terminals live inside them.
     private(set) var splitHosts: [UUID: NSView] = [:]
@@ -179,7 +181,8 @@ final class TerminalContainerViewController: NSViewController {
             }
             if v.isHidden == visible {
                 v.isHidden = !visible
-                if splitHosts[id] == nil { ls.terminal.setVisible(visible) } else { terminals(of: id).forEach { $0.setVisible(visible) } }
+                let drawing = visible && windowVisible
+                if splitHosts[id] == nil { ls.terminal.setVisible(drawing) } else { terminals(of: id).forEach { $0.setVisible(drawing) } }
                 if visible { incoming = v }
             }
         }
@@ -245,6 +248,26 @@ final class TerminalContainerViewController: NSViewController {
         guard let sel = shownSession else { return }
         manager.launchReady(sel)
         focusTerminal()
+    }
+
+    /// Window occlusion reaches the shown terminals, as in Ghostty's own app: a covered surface stops
+    /// drawing, and one shown again draws a frame at once. Without that, a surface whose contents
+    /// were dropped while the window was covered (screen locked or asleep) stayed blank until its
+    /// program printed something, which an idle agent never does.
+    func setWindowVisible(_ visible: Bool) {
+        guard windowVisible != visible else { return }
+        windowVisible = visible
+        if let host = shownHost { terminals(of: host).forEach { $0.setVisible(visible) } }
+    }
+
+    /// The displays woke: the shown terminals draw again from scratch (hidden, then shown), in case
+    /// the wake came without an occlusion change.
+    func redrawShownTerminals() {
+        guard windowVisible, let host = shownHost else { return }
+        for t in terminals(of: host) {
+            t.setVisible(false)
+            t.setVisible(true)
+        }
     }
 
     func focusTerminal() {
