@@ -86,6 +86,33 @@ struct MainWindowTests {
         #expect(w.container.placeholder.gridRows.last?.0 == "Changed")
     }
 
+    /// ⌘W on a closed session's preview takes it off the Closed list and shows the next closed one; the
+    /// open session behind it stays. After the last one, the open session shows again.
+    @Test func closeOnClosedPreviewForgetsIt() throws {
+        let f = Fixture()
+        defer { f.cleanup() }
+        let w = MainWindowController(manager: f.manager)
+        w.newShell(nil)
+        let open = try #require(f.selected)
+        for _ in 0..<2 {
+            w.newClaude(nil)
+            f.manager.close(try #require(f.selected))
+        }
+        f.manager.select(open)
+        let s = w.sidebar
+        s.outline.expandItem(s.node(.closedHeader))
+        let closed = f.manager.workspace.recentlyClosed(limit: 40).map(\.id)
+        #expect(closed.count == 2)
+        s.outline.selectRowIndexes([s.outline.row(forItem: s.node(.closed(closed[0])))], byExtendingSelection: false)
+        #expect(w.container.placeholder.page == .closed(closed[0]))
+        w.closeSession(nil)
+        #expect(f.manager.workspace.sessions[closed[0]] == nil && f.manager.live[open] != nil)
+        #expect(w.container.placeholder.page == .closed(closed[1]) && !w.container.placeholder.isHidden)
+        w.closeSession(nil)
+        #expect(f.manager.workspace.sessions[closed[1]] == nil && f.manager.live[open] != nil)
+        #expect(w.container.placeholder.isHidden && w.container.shownSession == open)
+    }
+
     @Test func actionsAndTitle() {
         let f = Fixture()
         defer { f.cleanup() }

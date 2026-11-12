@@ -1446,6 +1446,22 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         manager.forget(id)
     }
 
+    /// ⌘W on a closed session's preview: it leaves the Closed list and the next closed one shows, so
+    /// repeated ⌘W clears the list (after the last, the selected session shows again). False when no
+    /// closed session is selected.
+    func forgetSelectedClosed() -> Bool {
+        guard outline.selectedRow >= 0, let n = outline.item(atRow: outline.selectedRow) as? SidebarNode,
+              case .closed(let id) = n.kind else { return false }
+        let list = node(.closedHeader).children
+        let i = list.firstIndex { $0 === n } ?? 0
+        let next = list.indices.contains(i + 1) ? list[i + 1] : (i > 0 ? list[i - 1] : nil)
+        manager.forget(id)
+        if let next, case let row = outline.row(forItem: next), row >= 0 {
+            outline.selectRowIndexes([row], byExtendingSelection: false)
+        }
+        return true
+    }
+
     @objc func forgetAllClosed() {
         let alert = NSAlert()
         alert.messageText = "Remove all closed sessions from the list?"

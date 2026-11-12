@@ -406,6 +406,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSPopove
     /// ⌘W closes the focused split pane, else the session.
     @objc func closeSession(_ sender: Any?) {
         if FrontWindow.close(key: keyWindow(), main: window) { return }
+        // A closed session's preview: ⌘W takes it off the Closed list, never the open session behind.
+        if case .closed(_)? = container.placeholder.page, !container.placeholder.isHidden, sidebar.forgetSelectedClosed() { return }
         if let responder = window?.firstResponder as? NSView, let pane = manager.pane(containing: responder) {
             manager.requestClosePane(pane.id)
             return
