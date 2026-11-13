@@ -425,9 +425,12 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
                 guard persists(fp), persists(tp) else { return false }
                 switch (live(fp), live(tp)) {
                 case (true, true):
-                    // moveItem animates whatever the context says, and an animation that can't finish
-                    // (no display) holds the row views off their rows: unless animating, remove + insert.
-                    if full {
+                    // moveItem only for a single row: moving an open folder left its children's rows
+                    // with the heights of the rows they replaced (a session cut to a folder's 28 pt).
+                    // Without full motion it is remove + insert too (moveItem always animates).
+                    let moved = new[tp].flatMap { $0.indices.contains(t) ? nodes[$0[t]] : nil }
+                    let subtree = moved.map { outline.isItemExpanded($0) && !$0.children.isEmpty } ?? true
+                    if full, !subtree {
                         moves.append((item(fp), f, item(tp), t))
                     } else {
                         removes.append((item(fp), f))
@@ -497,10 +500,12 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     /// Reloads when rows or row views are out of step with the model. Also run when Corral comes back
     /// to the front and when the displays wake.
     @objc func healIfNeeded() {
-        guard loaded, !(rowsMatchModel() && rowViewsInPlace()) else { return }
+        let rows = rowsMatchModel(), views = rowViewsInPlace()
+        guard loaded, !(rows && views) else { return }
         // Never under the user's hands: a drag shifts and hides rows on purpose.
         if NSEvent.pressedMouseButtons != 0 { return scheduleSettleCheck() }
-        NSLog("Corral sidebar: rows out of step with the model, reloading")
+        NSLog("Corral sidebar: out of step with the model (rows match: %@, row views and heights: %@), reloading",
+              rows ? "yes" : "no", views ? "yes" : "no")
         heals += 1
         reload(forceFull: true)
     }
@@ -524,13 +529,18 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         return walk(roots) && row == outline.numberOfRows
     }
 
-    /// The row views sit on their rows (mid-animation they don't, so only checked at rest). Holds for
-    /// group rows only because they don't float (`floatsGroupRows = false`).
+    /// The row views sit on their rows, and those rows have their item's height: AppKit caches heights
+    /// per row, and a stale one (a session row at a folder's 28 pt) cut off the row's second line.
+    /// Mid-animation views are on their way, so only checked at rest. Holds for group rows only
+    /// because they don't float (`floatsGroupRows = false`).
     func rowViewsInPlace() -> Bool {
         var placed = true
         outline.enumerateAvailableRowViews { rv, r in
             let rect = outline.rect(ofRow: r)
             if rv.isHidden || abs(rv.frame.minY - rect.minY) > 1 || abs(rv.frame.height - rect.height) > 1 { placed = false }
+            if let item = outline.item(atRow: r), abs(rect.height - outlineView(outline, heightOfRowByItem: item)) > 0.5 {
+                placed = false
+            }
         }
         return placed
     }
@@ -723,8 +733,12 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         (item as? SidebarNode)?.isHeader ?? false
     }
 
+    /// Tests: a height for some rows other than their kind's (to leave a stale one in AppKit's cache).
+    var rowHeightOverride: ((SidebarNode) -> CGFloat?)?
+
     func outlineView(_ outlineView: NSOutlineView, heightOfRowByItem item: Any) -> CGFloat {
         guard let n = item as? SidebarNode else { return 26 }
+        if let h = rowHeightOverride?(n) { return h }
         switch n.kind {
         case .session: return 38
         case .folder: return 28

@@ -51,6 +51,7 @@ struct TrackerTakeoverTests {
         #expect(f.manager.workspace.sessions[f.selected!]?.customName == nil)
     }
 
+    /// Waits are long: the fake tracker is a script, slow to start while the whole suite runs.
     @Test func menuFlowConfirmsImportsAndForgets() async throws {
         let f = Fixture()
         defer { f.cleanup() }
@@ -66,18 +67,18 @@ struct TrackerTakeoverTests {
         defer { d.manager.prepareForTermination() }
 
         d.importFromTracker(nil)
-        await waitUntil { titles.count == 1 }
+        await waitUntil(timeout: 30) { titles.count == 1 }
         #expect(titles.last == "Take over 1 session from Ghostty?")
         #expect(d.manager.live.isEmpty, "cancel imports nothing")
 
         answer = .alertFirstButtonReturn
         d.importFromTracker(nil)
-        await waitUntil { FileManager.default.fileExists(atPath: log.path) }
+        await waitUntil(timeout: 30) { FileManager.default.fileExists(atPath: log.path) }
         #expect(d.manager.live.count == 1)
         #expect(try String(contentsOf: log, encoding: .utf8) == "s-1\n")
 
         d.importFromTracker(nil)
-        await waitUntil { titles.count == 3 }
+        await waitUntil(timeout: 30) { titles.count == 3 }
         #expect(titles.last == "Nothing to take over yet")
     }
 

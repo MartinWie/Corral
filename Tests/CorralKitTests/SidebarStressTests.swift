@@ -173,14 +173,16 @@ struct SidebarStressTests {
         #expect(s.heals == 0)
     }
 
-    /// With Reduce Motion a move is a remove and an insert: a moved folder that was open stays open.
-    @Test func movedFolderKeepsItsExpansion() throws {
+    /// An open folder moves as a remove and an insert (with or without full motion): it stays open, and
+    /// its children's rows get their own heights (moveItem left them with the replaced rows' heights).
+    @Test(arguments: [false, true])
+    func movedFolderKeepsItsExpansion(reduced: Bool) throws {
         let t = SidebarTests()
         let (f, s, w) = t.makeWindowed()
         defer { f.cleanup() }
         let was = (Motion.assumeVisible, Motion.reduced)
         Motion.assumeVisible = true
-        Motion.setReduced(true)
+        Motion.setReduced(reduced)
         defer {
             Motion.assumeVisible = was.0
             Motion.setReduced(was.1)
@@ -189,12 +191,21 @@ struct SidebarStressTests {
         let a = m.newFolder(name: "A"), b = m.newFolder(name: "B")
         m.newSession(agent: .shell, cwd: f.dir.path, folder: .some(a))
         m.newSession(agent: .shell, cwd: f.dir.path, folder: .some(b))
+        m.newSession(agent: .shell, cwd: f.dir.path, folder: .some(b))
         t.settle(w)
         let reloads = s.outline.reloadCount
+        _ = m.move(b, to: nil, at: 0)
+        t.settle(w)
+        #expect(s.outline.isItemExpanded(s.node(.folder(b))) && s.rowsMatchModel())
+        #expect(t.shownItems(s) == t.expectedItems(s) && s.outline.reloadCount == reloads)
+        let wrong = (0..<s.outline.numberOfRows).first { row in
+            guard let item = s.outline.item(atRow: row) else { return true }
+            return s.outline.rect(ofRow: row).height != s.outlineView(s.outline, heightOfRowByItem: item)
+        }
+        #expect(wrong == nil)
         _ = m.move(a, to: b, at: 0)
         t.settle(w)
-        #expect(s.outline.isItemExpanded(s.node(.folder(a))) && s.rowsMatchModel())
-        #expect(t.shownItems(s) == t.expectedItems(s) && s.outline.reloadCount == reloads)
+        #expect(s.outline.isItemExpanded(s.node(.folder(a))) && s.rowsMatchModel() && s.outline.reloadCount == reloads)
     }
 
     /// Rows or row views out of step with the model are noticed (when structure updates settle, when
@@ -231,12 +242,24 @@ struct SidebarStressTests {
         t.settle(w)
         #expect(s.heals == 1 && s.rowViewsInPlace())
 
+        // A row left at another item's height in AppKit's cache: a session cut to a folder's 28 pt.
+        let session = try #require(m.workspace.openSessionsInOrder.first)
+        let sessionRow = t.row(s, .session(session))
+        s.rowHeightOverride = { $0.kind == .session(session) ? 28 : nil }
+        s.outline.noteHeightOfRows(withIndexesChanged: [sessionRow])
+        s.rowHeightOverride = nil
+        t.settle(w)
+        #expect(s.outline.rect(ofRow: sessionRow).height == 28 && !s.rowViewsInPlace())
+        s.healIfNeeded()
+        t.settle(w)
+        #expect(s.heals == 2 && s.outline.rect(ofRow: t.row(s, .session(session))).height == 38 && s.rowViewsInPlace())
+
         // Coming back to the front: the header gone from the outline while the model still has it.
         s.outline.removeItems(at: [s.roots.count - 1], inParent: nil, withAnimation: [])
         #expect(t.row(s, .closedHeader) < 0 && !s.rowsMatchModel())
         NotificationCenter.default.post(name: NSApplication.didBecomeActiveNotification, object: NSApp)
         t.settle(w)
-        #expect(s.heals == 2 && t.row(s, .closedHeader) >= 0 && s.rowsMatchModel())
+        #expect(s.heals == 3 && t.row(s, .closedHeader) >= 0 && s.rowsMatchModel())
         #expect(m.workspace.selected == selected && s.outline.selectedRow == t.row(s, .session(selected)))
     }
 
