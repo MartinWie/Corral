@@ -428,7 +428,7 @@ struct SidebarTests {
         f.manager.newSession(agent: .shell, cwd: f.dir.path, folder: .some(nil))
         settle(w)
         s.planner = { Self.naivePlan(old: $0, new: $1) }
-        let reloads = s.outline.reloadCount
+        var reloads = s.outline.reloadCount
 
         // Pure insert at the root and inside an expanded folder.
         f.manager.newSession(agent: .claude, cwd: f.dir.path, folder: .some(nil))
@@ -442,6 +442,16 @@ struct SidebarTests {
         let sub = f.manager.newFolder(name: "Sub")
         f.manager.newSession(agent: .shell, cwd: f.dir.path, folder: .some(sub))
         #expect(s.outline.isItemExpanded(s.node(.folder(sub))))
+        // A session started by another open one is marked as its offshoot, until that one is closed.
+        let offshoot = f.manager.newSession(agent: .claude, cwd: f.dir.path, parent: added, name: "Helper", select: false)
+        #expect(s.sessionModel(offshoot)?.title == "↳ Helper" && s.sessionModel(added)?.title.hasPrefix("↳") == false)
+        // Collapsed and expanded from outside (`corral folder collapse`): the outline follows the model
+        // (with a reload, which the rest of this test counts from here).
+        f.manager.showFolder(sub, expanded: false)
+        #expect(!s.outline.isItemExpanded(s.node(.folder(sub))) && shownItems(s) == expectedItems(s))
+        f.manager.showFolder(sub, expanded: true)
+        #expect(s.outline.isItemExpanded(s.node(.folder(sub))) && shownItems(s) == expectedItems(s))
+        reloads = s.outline.reloadCount
         #expect(shownItems(s) == expectedItems(s))
 
         // Pure remove (forget a closed one is a reload-shaped change; delete a folder is a remove + inserts).

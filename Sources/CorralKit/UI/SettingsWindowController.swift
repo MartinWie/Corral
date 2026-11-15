@@ -78,6 +78,23 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private(set) var agentHeaders: [AgentKind: SettingsRow] = [:]
     /// Each agent's section, greyed out while the agent isn't installed.
     private(set) var agentLists: [AgentKind: SettingsList] = [:]
+    /// Model per tier (`ModelTier.allCases` order) and the tier new sessions start on, per agent.
+    private(set) var modelFields: [AgentKind: [NSTextField]] = [:]
+    private(set) var standardModelPopups: [AgentKind: NSPopUpButton] = [:]
+    /// Command line: the `corral` command's switch and the skill's install buttons.
+    let controlSwitch = NSSwitch()
+    private(set) var skillButtons: [AgentSkill.Target: NSButton] = [:]
+    private(set) var skillRow: SettingsRow!
+    /// Standing addition to the prompt of sessions `corral spawn` starts, and the measuring of sessions.
+    let spawnNoteSwitch = NSSwitch()
+    let spawnNoteField = NSTextField(wrappingLabelWithString: "")
+    let measureSwitch = NSSwitch()
+    let controlAllSwitch = NSSwitch()
+    /// Sessions started through `corral`: closed some time after they finish, and quiet unless they fail or wait.
+    let tidyPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    let quietSwitch = NSSwitch()
+    static let tidyChoices: [(title: String, minutes: Int)] = [("Never", 0), ("After 5 minutes", 5), ("After 30 minutes", 30),
+                                                               ("After 2 hours", 120)]
     private var folderIds: [UUID?] = []
     /// Folder list the popup menus were built from; menus are rebuilt only when it changes.
     private var folderSignature: [String]?
@@ -115,6 +132,21 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     /// Agents that aren't installed: shown, but greyed out.
     static let unavailableAlpha: CGFloat = 0.45
     static let looseTitle = "Next to selection"
+    static let modelFieldWidth: CGFloat = 118
+    static let agentDefaultModel = "Agent's default"
+    static let controlCaption = "The corral command starts sessions, reads them and answers their permission prompts, "
+        + "for any program running as you."
+    static let skillCaption = "Teaches agents the corral command and links it at ~/.local/bin/corral. Installing turns "
+        + "the command on."
+    static let controlAllCaption = "Off: a session can approve, type into and close only the sessions it started. "
+        + "Your own scripts can always."
+    static let quietCaption = "Sessions started through corral notify you only when one fails, or has waited for an "
+        + "answer for five minutes."
+    static let spawnNoteCaption = "The text below goes at the end of the prompt of every session corral spawn starts."
+    static let measureCaption = "corral stats shows each session's token use and flags wasted effort: failed or repeated "
+        + "tool calls, files read again and again, compactions, a large model on a small job. Claude Code only."
+    static let modelsFootnote = "Models: what corral spawn --model easy, medium or high starts, and the tier new sessions "
+        + "use. An empty field leaves the choice to the agent."
     static let agentsFootnote = "A folder's own default directory wins over these. With no default at all, a new session "
         + "starts in the selected session's directory, then in your home folder."
     static let terminalFootnote = "Fonts, colors, themes and keybinds come from your Ghostty config. Corral's window "
@@ -363,14 +395,119 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             folderPopups[agent] = popup
             clearButtons[agent] = clear
             chooseButtons[agent] = choose
-            let list = SettingsList([header, start, folder])
+            var rows: [NSView] = [header, start, folder]
+            if agent != .shell { rows += modelRows(agent, index: i) }
+            let list = SettingsList(rows)
             agentLists[agent] = list
             list.setAccessibilityElement(true)
             list.setAccessibilityRole(.group)
             list.setAccessibilityLabel(agent.displayName)
-            page.addSection(nil, list, footnote: i == AgentKind.allCases.count - 1 ? Self.agentsFootnote : nil)
+            page.addSection(nil, list, footnote: i == AgentKind.allCases.count - 1
+                ? Self.agentsFootnote + "\n" + Self.modelsFootnote : nil)
         }
+
+        controlSwitch.target = self
+        controlSwitch.action = #selector(controlChanged(_:))
+        controlSwitch.controlSize = .small
+        controlSwitch.setAccessibilityLabel("Let agents and scripts control Corral")
+        let control = SettingsRow(title: "Let agents and scripts control Corral", caption: Self.controlCaption,
+                                  accessory: controlSwitch)
+        let buttons = AgentSkill.Target.allCases.enumerated().map { i, target -> NSButton in
+            let b = NSButton(title: target.title, target: nil, action: nil)
+            button(b, #selector(installSkill(_:)))
+            b.tag = i
+            b.imagePosition = .imageLeading
+            skillButtons[target] = b
+            return b
+        }
+        let group = NSStackView(views: buttons)
+        group.orientation = .horizontal
+        group.spacing = 6
+        skillRow = SettingsRow(title: "Agent skill", caption: Self.skillCaption, accessory: group)
+        for (toggle, action, label) in [(spawnNoteSwitch, #selector(spawnNoteChanged(_:)), "Add to the prompts of started sessions"),
+                                        (measureSwitch, #selector(measureChanged(_:)), "Measure sessions"),
+                                        (controlAllSwitch, #selector(controlAllChanged(_:)), "Let sessions steer any session"),
+                                        (quietSwitch, #selector(quietChanged(_:)), "Quiet started sessions")] {
+            toggle.target = self
+            toggle.action = action
+            toggle.controlSize = .small
+            toggle.setAccessibilityLabel(label)
+        }
+        let note = SettingsRow(title: "Add to the prompts of started sessions", caption: Self.spawnNoteCaption,
+                               accessory: spawnNoteSwitch)
+        spawnNoteField.isEditable = true
+        spawnNoteField.isSelectable = true
+        spawnNoteField.isBezeled = true
+        spawnNoteField.drawsBackground = true
+        spawnNoteField.font = Self.smallFont
+        spawnNoteField.target = self
+        spawnNoteField.action = #selector(spawnNoteChanged(_:))
+        (spawnNoteField.cell as? NSTextFieldCell)?.sendsActionOnEndEditing = true
+        spawnNoteField.setAccessibilityLabel("Text added to the prompts of started sessions")
+        spawnNoteField.translatesAutoresizingMaskIntoConstraints = false
+        // Its own row: the field's width comes from the row, its height is fixed (four lines).
+        let noteText = NSView()
+        noteText.translatesAutoresizingMaskIntoConstraints = false
+        noteText.addSubview(spawnNoteField)
+        NSLayoutConstraint.activate([
+            spawnNoteField.topAnchor.constraint(equalTo: noteText.topAnchor, constant: 10),
+            spawnNoteField.bottomAnchor.constraint(equalTo: noteText.bottomAnchor, constant: -10),
+            spawnNoteField.leadingAnchor.constraint(equalTo: noteText.leadingAnchor, constant: SettingsRow.padding),
+            spawnNoteField.trailingAnchor.constraint(equalTo: noteText.trailingAnchor, constant: -SettingsRow.padding),
+            spawnNoteField.heightAnchor.constraint(equalToConstant: 64),
+        ])
+        let measure = SettingsRow(title: "Measure sessions", caption: Self.measureCaption, accessory: measureSwitch)
+        let all = SettingsRow(title: "Let sessions steer any session", caption: Self.controlAllCaption, accessory: controlAllSwitch)
+        tidyPopup.addItems(withTitles: Self.tidyChoices.map(\.title))
+        tidyPopup.target = self
+        tidyPopup.action = #selector(tidyChanged(_:))
+        tidyPopup.controlSize = .small
+        tidyPopup.font = Self.smallFont
+        tidyPopup.setAccessibilityLabel("Close finished started sessions")
+        tidyPopup.toolTip = "They stay in Closed and can be reopened. Folders corral made go once they are empty."
+        tidyPopup.widthAnchor.constraint(equalToConstant: Self.popupWidth).isActive = true
+        let tidy = SettingsRow(title: "Close finished started sessions", accessory: tidyPopup)
+        let quiet = SettingsRow(title: "Quiet started sessions", caption: Self.quietCaption, accessory: quietSwitch)
+        page.addSection("Command line", SettingsList([control, all, skillRow, note, noteText, tidy, quiet, measure]))
         return page
+    }
+
+    /// "Models": a field per tier; "New sessions": the tier sessions start on without one named.
+    private func modelRows(_ agent: AgentKind, index: Int) -> [NSView] {
+        let fields = ModelTier.allCases.enumerated().map { t, tier -> NSTextField in
+            let field = NSTextField(string: "")
+            field.placeholderString = tier.title
+            field.controlSize = .small
+            field.font = Self.smallFont
+            field.tag = index * ModelTier.allCases.count + t
+            field.target = self
+            field.action = #selector(modelChanged(_:))
+            (field.cell as? NSTextFieldCell)?.sendsActionOnEndEditing = true
+            field.cell?.usesSingleLineMode = true
+            field.cell?.isScrollable = true
+            field.toolTip = "\(agent.displayName) model for \(tier.rawValue) work"
+            field.setAccessibilityLabel("\(agent.displayName) \(tier.rawValue) model")
+            field.widthAnchor.constraint(equalToConstant: Self.modelFieldWidth).isActive = true
+            return field
+        }
+        modelFields[agent] = fields
+        let group = NSStackView(views: fields)
+        group.orientation = .horizontal
+        group.spacing = 6
+        let models = SettingsRow(title: "Models", accessory: group, titleWidth: Self.titleColumn)
+
+        let popup = NSPopUpButton(frame: .zero, pullsDown: false)
+        popup.addItems(withTitles: [Self.agentDefaultModel] + ModelTier.allCases.map(\.title))
+        popup.tag = index
+        popup.target = self
+        popup.action = #selector(standardModelChanged(_:))
+        popup.controlSize = .small
+        popup.font = Self.smallFont
+        popup.toolTip = "Model tier for new \(agent.displayName) sessions"
+        popup.setAccessibilityLabel("Model tier for new \(agent.displayName) sessions")
+        popup.widthAnchor.constraint(equalToConstant: Self.popupWidth).isActive = true
+        standardModelPopups[agent] = popup
+        return [models, SettingsRow(title: "New sessions", accessory: popup, titleWidth: Self.titleColumn)]
     }
 
     static func searchCaption() -> String {
@@ -471,7 +608,11 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         window.setFrameAutosaveName(frameName)
     }
 
-    func windowWillClose(_ notification: Notification) { shortcutsView?.endRecording() }
+    func windowWillClose(_ notification: Notification) {
+        shortcutsView?.endRecording()
+        // A model name still being typed is kept.
+        window?.makeFirstResponder(nil)
+    }
 
     /// Back from System Settings: notifications may have been allowed or turned off there.
     func windowDidBecomeKey(_ notification: Notification) {
@@ -525,6 +666,15 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             let index = folderIds.firstIndex { $0 == d.folder } ?? 0
             if popup.indexOfSelectedItem != index { popup.selectItem(at: index) }
         }
+        for (agent, fields) in modelFields {
+            let models = ws.settings.models(for: agent)
+            for (field, tier) in zip(fields, ModelTier.allCases)
+            where field.currentEditor() == nil && field.stringValue != models[tier] {
+                field.stringValue = models[tier]
+            }
+            let index = models.standard.flatMap(ModelTier.allCases.firstIndex(of:)).map { $0 + 1 } ?? 0
+            if standardModelPopups[agent]?.indexOfSelectedItem != index { standardModelPopups[agent]?.selectItem(at: index) }
+        }
         refreshIntegrations()
         refreshKeepAwake()
         refreshUpdates()
@@ -554,7 +704,33 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
                 : Self.notInstalled
             agentLists[agent]?.alphaValue = installed ? 1 : Self.unavailableAlpha
             // Clear stays usable: a start directory set before the agent went away can still be removed.
-            for control in [chooseButtons[agent], folderPopups[agent]] as [NSControl?] { control?.isEnabled = installed }
+            var controls: [NSControl?] = [chooseButtons[agent], folderPopups[agent], standardModelPopups[agent]]
+            controls += modelFields[agent] ?? []
+            for control in controls { control?.isEnabled = installed }
+        }
+        let control: NSControl.StateValue = manager.workspace.settings.control ? .on : .off
+        if controlSwitch.state != control { controlSwitch.state = control }
+        let settings = manager.workspace.settings
+        let noteOn: NSControl.StateValue = settings.spawnNoteOn ? .on : .off
+        if spawnNoteSwitch.state != noteOn { spawnNoteSwitch.state = noteOn }
+        if spawnNoteField.currentEditor() == nil, spawnNoteField.stringValue != settings.spawnNote {
+            spawnNoteField.stringValue = settings.spawnNote
+        }
+        spawnNoteField.isEnabled = settings.spawnNoteOn
+        let all: NSControl.StateValue = settings.controlAll ? .on : .off
+        if controlAllSwitch.state != all { controlAllSwitch.state = all }
+        let tidy = Self.tidyChoices.firstIndex { $0.minutes == settings.tidyMinutes } ?? 0
+        if tidyPopup.indexOfSelectedItem != tidy { tidyPopup.selectItem(at: tidy) }
+        let quiet: NSControl.StateValue = settings.quietSpawned ? .on : .off
+        if quietSwitch.state != quiet { quietSwitch.state = quiet }
+        let measuring: NSControl.StateValue = settings.measure ? .on : .off
+        if measureSwitch.state != measuring { measureSwitch.state = measuring }
+        let check = NSImage(systemSymbolName: "checkmark", accessibilityDescription: "Installed")
+        for (target, button) in skillButtons {
+            let on = manager.env.skillHome.map { AgentSkill.isInstalled(target, home: $0, claudeDir: claudeDir) } ?? false
+            button.image = on ? check : nil
+            button.isEnabled = manager.env.skillHome != nil
+            button.setAccessibilityLabel(on ? "Update the \(target.title) skill" : "Install the \(target.title) skill")
         }
         shortcutsView?.setUnavailable(Set(AgentKind.allCases.filter { !manager.installedAgents.contains($0) }
             .map { NSStringFromSelector($0.newSessionAction) }))
@@ -664,6 +840,66 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             self?.rebuildButton.title = "Rebuild Now"
             self?.rebuildButton.isEnabled = true
         }
+    }
+
+    private var claudeDir: URL { manager.env.integrationPaths.claudeSettings.deletingLastPathComponent() }
+
+    @objc func controlChanged(_ sender: NSSwitch) {
+        manager.setControl(sender.state == .on)
+    }
+
+    /// The switch or the text; an emptied text goes back to the suggestion.
+    @objc func spawnNoteChanged(_ sender: Any?) {
+        let text = spawnNoteField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        manager.setSpawnNote(on: spawnNoteSwitch.state == .on, text: text.isEmpty ? AppSettings.defaultSpawnNote : text)
+        refreshIntegrations()
+    }
+
+    @objc func controlAllChanged(_ sender: NSSwitch) {
+        manager.setControlAll(sender.state == .on)
+    }
+
+    @objc func tidyChanged(_ sender: NSPopUpButton) {
+        manager.setTidyMinutes(Self.tidyChoices[max(0, sender.indexOfSelectedItem)].minutes)
+    }
+
+    @objc func quietChanged(_ sender: NSSwitch) {
+        manager.setQuietSpawned(sender.state == .on)
+    }
+
+    @objc func measureChanged(_ sender: NSSwitch) {
+        manager.setMeasure(sender.state == .on)
+    }
+
+    @objc func installSkill(_ sender: NSButton) {
+        guard let home = manager.env.skillHome else { return }
+        let target = AgentSkill.Target.allCases[sender.tag]
+        do {
+            try AgentSkill.install(into: target.skillsFolder(home: home, claudeDir: claudeDir), home: home,
+                                   executable: skillExecutable())
+            manager.setControl(true)
+        } catch {
+            manager.env.alert("Couldn't install the \(target.title) skill", error.localizedDescription)
+        }
+        refreshIntegrations()
+    }
+
+    /// The binary `~/.local/bin/corral` points at (tests pin it).
+    var skillExecutable: () -> URL? = { CommandLineLink.executable }
+
+    @objc func modelChanged(_ sender: NSTextField) {
+        let tiers = ModelTier.allCases
+        let agent = AgentKind.allCases[sender.tag / tiers.count]
+        var models = manager.workspace.settings.models(for: agent)
+        models[tiers[sender.tag % tiers.count]] = sender.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        manager.setModels(models, for: agent)
+    }
+
+    @objc func standardModelChanged(_ sender: NSPopUpButton) {
+        let agent = self.agent(sender)
+        var models = manager.workspace.settings.models(for: agent)
+        models.standard = sender.indexOfSelectedItem == 0 ? nil : ModelTier.allCases[sender.indexOfSelectedItem - 1]
+        manager.setModels(models, for: agent)
     }
 
     @objc func installIntegration(_ sender: NSButton) {

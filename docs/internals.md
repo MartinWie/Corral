@@ -159,6 +159,71 @@ then removed from the tracker (`claude-sessions forget`) so Ghostty never reopen
 Sessions still running in a Ghostty tab are left alone (a live process can't move, and resuming
 it twice would give two writers): quit Ghostty first, which marks them restorable, then import.
 
+## The corral command
+
+The app binary run with a command as first argument (`CorralCLI.commands`) is the `corral` command;
+`~/.local/bin/corral` links to it (`CommandLineLink`, made when the skill is installed, repointed at
+launch). It asks the running app over `control.sock` (0600, same user only) and prints the answer;
+when Corral isn't running it starts it with `open -g`.
+
+- Off until **Settings › Agents › Command line** turns it on (`AppSettings.control`); installing the
+  skill there turns it on too. The skill (`AgentSkill.markdown`, one static text) goes to Claude
+  Code's and OpenCode's skills folders and is rewritten at launch when an update changed it.
+- `spawn` starts an agent session with a model, a first prompt and extra agent arguments on its
+  command line, below the session it was run from (`CORRAL_SESSION`, set in every Corral terminal),
+  without taking the screen. `--model easy|medium|high` reads Settings › Agents › Models; the model is
+  kept on the session so a resume stays on it.
+- `wait` blocks until a watched session needs permission or input, is done, failed, quit or was
+  closed. Each event is reported once; one that happened while nobody waited is reported by the next
+  `wait`. Without ids it watches the sessions started from the caller's session.
+- `approve` / `deny` type 1 / Esc into a Claude permission prompt, like the notification buttons, and
+  Return / Esc into OpenCode's (its "Allow once" is preselected). A session may approve, type into and
+  close only the sessions it started and theirs, unless **Let sessions steer any session** is on;
+  commands from outside any session always may. The caller is read from the environment, so this
+  keeps sessions out of each other's way; it is not a lock.
+- A session started by another open one shows "↳" before its name in the sidebar. A turn's end nobody
+  waited for is kept with the session (`SessionRecord.unreported`), so the next `wait` reports it even
+  after Corral restarted.
+  `send` types a prompt (several lines as one paste) and presses Return a moment later; `--raw` only
+  types. `output` is the turn's closing message (the Stop hook's, else the transcript's end) or the
+  terminal's screen.
+- Callbacks. An agent runs `wait` as a background command and reads the printed event. A script reads
+  the exit status of `wait` / `spawn --wait` (0 done, 3 done but reported as failed, 10 needs
+  permission, 11 needs input, 12 error, 13 exited or closed, 124 timeout) or the `--json` answer.
+  `--done` returns only at a session's end and leaves its prompts to the user or another waiter. A
+  started session hands back a value with `corral report [--fail] TEXT` (kept for the turn, shown as
+  `report`). While someone waits for a session's next event the user gets no notification for it.
+- `folder list|create|move|collapse|expand|rename|delete` and `spawn --folder` work on sidebar
+  folders by path ("Monitoring/Disk": names from the top, matched without case, missing ones made by
+  `move`, `create` and `spawn`). Deleting a folder keeps its sessions. The sidebar follows a collapse
+  from outside with a reload.
+- Folder trust: Claude asks whether to trust a folder it hasn't worked in before any hook runs. After
+  a fresh Claude start shows, the screen is looked at twice (1 s and 3 s later, `checkTrustPrompt`);
+  with the question up the session reads "needs input: Trust this folder?", `approve` answers yes
+  (moves to "Yes" when the pointer isn't on it, then Return), `deny` no, and a session started with
+  `spawn --trust` answers yes by itself.
+- Corral drops an agent session's variables (`CLAUDECODE`, `CLAUDE_CODE_CHILD_SESSION`, …) from its
+  own environment at start (`CorralCLI.leaveAgentSession`), and the command starts the app without
+  them. Started from an agent's shell with them, every Claude in Corral took itself for a child of
+  that session and kept no transcript.
+- `events [ID…] [--mine]` keeps its connection and gets one line per state change (also "starting"
+  for a new session and "closed"), as text or with `--json` as JSON lines. It reports nothing twice
+  per state and doesn't use up what `wait` reports.
+- Sessions started through `corral` (`SessionRecord.spawned`) can be closed a while after they finish
+  (**Close finished started sessions**: done or exited, never errors, not the one on screen; they stay
+  in Closed, and folders the command made go once empty) and kept quiet (**Quiet started sessions**:
+  a notification only for a failure, or for a prompt that has waited five minutes).
+- `status` of a session that sits in `starting` or `idle` includes the screen's last lines: a prompt
+  Corral can't see (folder trust) shows there.
+- Settings › Agents › Command line also holds a standing addition to every spawned session's prompt
+  (off by default) and **Measure sessions** (off by default): `corral stats [ID]` reads Claude
+  transcripts (`SessionAnalysis`, off the main thread) for tokens per response (input, output, cache
+  read and write), turns, tool calls and failures, compactions and duration, and flags failed or
+  repeated calls, files read again and again, compactions, a prompt cache that isn't reused and a large
+  model on a small job. Subagents' own transcripts (`<session>/subagents/*.jsonl`) count toward the
+  tokens; repeats are counted within one turn or up to a compaction; time is the sum of the turns'
+  working time.
+
 ## Search (⌘K)
 
 SQLite FTS5 index (`~/Library/Application Support/Corral/index.sqlite`) over:

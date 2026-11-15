@@ -407,6 +407,8 @@ public enum CorralPaths {
     }
 
     public static var socket: URL { support.appendingPathComponent("corral.sock") }
+    /// Requests from the `corral` command (`ControlServer`).
+    public static var control: URL { support.appendingPathComponent("control.sock") }
     public static var index: URL { support.appendingPathComponent("index.sqlite") }
     public static var scrollback: URL { support.appendingPathComponent("scrollback", isDirectory: true) }
 }
@@ -420,13 +422,31 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public var notifications = NotificationSettings()
     /// Agents whose status hooks the user removed in Settings: the sidebar stops offering them.
     public var hooksRemoved: Set<AgentKind> = []
+    /// The `corral` command may start sessions, read them and answer their prompts.
+    public var control = false
+    /// A session may approve, type into and close any session, not only the ones it started.
+    public var controlAll = false
+    /// Models per agent (`AgentKind.rawValue`); agents without an entry use `AgentModels.defaults`.
+    public var models: [String: AgentModels] = [:]
+    /// Text added to the prompt of every session `corral spawn` starts, while `spawnNoteOn`.
+    public var spawnNote = AppSettings.defaultSpawnNote
+    public var spawnNoteOn = false
+    /// `corral stats`: token use and inefficiencies read from transcripts.
+    public var measure = false
+    /// Minutes after which a finished session started through `corral` is closed; 0 = never.
+    public var tidyMinutes = 0
+    /// For sessions started through `corral`: notify only when one fails or has waited on the user for `quietWait`.
+    public var quietSpawned = false
+
+    public static let defaultSpawnNote = "When you are finished, run `~/.local/bin/corral report \"<result in one line>\"` "
+        + "(add --fail if you could not do it), then end with a short summary of what you did."
 
     public init(keepAwake: Bool = false, notifications: NotificationSettings = NotificationSettings()) {
         self.keepAwake = keepAwake
         self.notifications = notifications
     }
 
-    enum CodingKeys: String, CodingKey { case keepAwake, keepDisplayOn, notifications, hooksRemoved }
+    enum CodingKeys: String, CodingKey { case keepAwake, keepDisplayOn, notifications, hooksRemoved, control, controlAll, models, spawnNote, spawnNoteOn, measure, tidyMinutes, quietSpawned }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -434,5 +454,26 @@ public struct AppSettings: Codable, Equatable, Sendable {
         keepDisplayOn = try c.decodeIfPresent(Bool.self, forKey: .keepDisplayOn) ?? false
         notifications = (try? c.decodeIfPresent(NotificationSettings.self, forKey: .notifications)) ?? NotificationSettings()
         hooksRemoved = (try? c.decodeIfPresent(Set<AgentKind>.self, forKey: .hooksRemoved)) ?? []
+        control = (try? c.decodeIfPresent(Bool.self, forKey: .control)) ?? false
+        controlAll = (try? c.decodeIfPresent(Bool.self, forKey: .controlAll)) ?? false
+        models = (try? c.decodeIfPresent([String: AgentModels].self, forKey: .models)) ?? [:]
+        spawnNote = (try? c.decodeIfPresent(String.self, forKey: .spawnNote)) ?? AppSettings.defaultSpawnNote
+        spawnNoteOn = (try? c.decodeIfPresent(Bool.self, forKey: .spawnNoteOn)) ?? false
+        measure = (try? c.decodeIfPresent(Bool.self, forKey: .measure)) ?? false
+        tidyMinutes = (try? c.decodeIfPresent(Int.self, forKey: .tidyMinutes)) ?? 0
+        quietSpawned = (try? c.decodeIfPresent(Bool.self, forKey: .quietSpawned)) ?? false
+    }
+
+    public func models(for agent: AgentKind) -> AgentModels {
+        models[agent.rawValue] ?? .defaults(for: agent)
+    }
+
+    /// The model for `name`: a tier's (nil when that slot is empty), any other name as given, and
+    /// without a name the agent's standard tier.
+    public func model(for agent: AgentKind, named name: String?) -> String? {
+        let set = models(for: agent)
+        guard let name, !name.isEmpty else { return set.standard.flatMap { set[$0].isEmpty ? nil : set[$0] } }
+        guard let tier = ModelTier(rawValue: name.lowercased()) else { return name }
+        return set[tier].isEmpty ? nil : set[tier]
     }
 }

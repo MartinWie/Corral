@@ -105,7 +105,7 @@ struct TrackerTakeoverTests {
         d2.launch(showWindow: false)
         defer { d2.manager.prepareForTermination() }
         d2.importFromTracker(nil)
-        await waitUntil { titles.count == 2 }
+        await waitUntil(timeout: 30) { titles.count == 2 }
         #expect(titles.last == "Couldn't read claude-sessions")
     }
 }

@@ -52,7 +52,7 @@ image metadata) or build output. `scripts/leak-scan.py` checks shipped files; ex
   so it only grows on main. Notary credentials: `APPLE_ID`/`TEAM_ID`/`NOTARY_PASSWORD` env, else a
   notarytool keychain profile (`CORRAL_NOTARY_PROFILE`). `CORRAL_DIST=<dir>` builds there instead of
   `dist/` (bundle.sh starts with `rm -rf` of the app: never under a running `dist/Corral.app`).
-- Sparkle EdDSA private key: login keychain, account `corral` (not Desko's default `ed25519`); back up
+- Sparkle EdDSA private key: login keychain, account `corral` (not Sparkle's default `ed25519`); back up
   with `generate_keys --account corral -x <file>`. Public key: `Resources/app/sparkle-public-key`.
   Tools: `scripts/sparkle-tools.sh` (downloads the version in Package.resolved, checksum pinned there).
 - Icon: `swift scripts/make-icon.swift [new-art.png]` → `Resources/app/AppIcon.icns` from
@@ -202,6 +202,34 @@ image metadata) or build output. `scripts/leak-scan.py` checks shipped files; ex
   (`scheduleSettleCheck`), on activation, on display wake and when the window shows again. Test
   windows are never on screen, so they stall animations like a sleeping display:
   `SidebarStressTests` relies on that.
+- `corral` command: the app binary with a command as first argument (`CorralCLI.main` in main.swift,
+  before libghostty starts; `~/.local/bin/corral` links to it, `CommandLineLink`). Parsing and printing
+  are in CorralCore (`CorralCLI`), the app's side in `SessionControl.swift` (`handleControl`), the
+  socket in `ControlServer` (`control.sock`: one JSON line each way, the reply may come much later,
+  a client that leaves cancels its waiter). Everything is refused while `AppSettings.control` is off.
+  `corral wait` is event-driven (`controlCheck` after every status change, `controlClosed` before a
+  close), each event reported once (`ControlState.delivered`); per-session extras (pending tool input,
+  closing message, transcript path) live in `ControlState`, never in `LiveStatus`, and go with the
+  session on close. The caller is `CORRAL_SESSION`, which, unlike `CORRAL_SURFACE_ID`, is not scrubbed
+  from Claude's Bash tool. Model tiers: `AppSettings.models` / `model(for:named:)`; `SessionRecord.model`
+  keeps a session's model for resumes. The skill text (`AgentSkill.markdown`) is static: no paths or
+  names of this Mac. `wait`'s exit status maps the state (`CorralCLI.exitStatus`); a waiter with
+  `final` takes only ends; `corral report` values live in `ControlState.reports` for the turn;
+  `controlWatched` keeps user notifications back for events a waiter takes. `corral stats`
+  (`SessionAnalysis`, Claude transcripts, `AppSettings.measure`) runs off the main thread and counts a
+  response's usage once per `message.id` (Claude writes a line per content block). The app must not carry an agent session's variables
+  (`leaveAgentSession` in main.swift: with `CLAUDE_CODE_CHILD_SESSION` inherited, Claude sessions kept no
+  transcripts). Claude's folder trust question fires no hook: `checkTrustPrompt` looks at the screen
+  twice after a fresh start (bounded like the launch probe; never widen it). `corral events` listeners (`ControlState.subscribers`) get every state change through
+  `controlPublish` (pushed lines on a connection that stays open, `Connection.push`). Auto-close
+  (`scheduleTidy`, one timer per finished spawned session, cancelled by any status change) and quiet
+  notifications (`control.quiet`, in `notifyIfNeeded`) apply to `SessionRecord.spawned` only.
+  `mayAct` limits approve/send/close to the caller's descendants
+  unless `AppSettings.controlAll`. Folders are addressed by path (`resolveFolder`); a folder
+  opened or closed outside the sidebar (`showFolder`) needs the reload `reload` now does when the
+  outline's expansion differs from the model (AppKit keeps an item's expansion across `reloadData`, so
+  `expand` also collapses). Tests get no control socket and no skill home unless they set
+  `controlPath` / `skillHome`.
 - Settings rows: a wrapping caption must get its width from constraints (row/page), never from its
   text, and never set `preferredMaxLayoutWidth` during layout (the window then loops on constraint
   passes and AppKit throws). Scroll views must start below the transparent titlebar (else macOS 26
@@ -209,5 +237,5 @@ image metadata) or build output. `scripts/leak-scan.py` checks shipped files; ex
 
 ## Files
 
-- State: `~/Library/Application Support/Corral/{state.json,index.sqlite,corral.sock}`.
+- State: `~/Library/Application Support/Corral/{state.json,index.sqlite,corral.sock,control.sock}`.
 - `CORRAL_SUPPORT_DIR` overrides that directory (tests / a second instance).

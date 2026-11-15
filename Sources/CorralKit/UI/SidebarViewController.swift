@@ -322,9 +322,10 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         let previous = outline.selectedRow >= 0 ? outline.item(atRow: outline.selectedRow) as? SidebarNode : nil
         syncingSelection = true
         var applied = false
-        if loaded, !forceFull, old == shown {
+        if loaded, !forceFull, old == shown, rowsMatchModel() {
             // Same tree (background refreshes, renames, folder directories): cells update in place, so
-            // loops keep their phase and hover and in-flight animations survive.
+            // loops keep their phase and hover and in-flight animations survive. Not when a folder was
+            // opened or closed from outside (`corral folder collapse`): that takes a reload.
             reconfigureVisibleRows(animated: true)
             applied = true
         } else if loaded, !forceFull, SidebarFX.canAnimate(outline), case .ops(let ops) = planner(old, shown) {
@@ -562,7 +563,8 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         for n in list {
             switch n.kind {
             case .folder(let id):
-                if manager.workspace.folders[id]?.expanded ?? true { outline.expandItem(n) }
+                // A reload keeps an item's expansion: one the model has closed is closed here.
+                if manager.workspace.folders[id]?.expanded ?? true { outline.expandItem(n) } else if outline.isItemExpanded(n) { outline.collapseItem(n) }
                 expand(n.children)
             case .backgroundHeader:
                 if !UserDefaults.standard.bool(forKey: "sidebar.background.collapsed") { outline.expandItem(n) }
@@ -648,11 +650,15 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
 
     // MARK: Row models
 
+    static let childMark = "↳ "
+
     func sessionModel(_ id: UUID) -> SessionRowModel? {
         guard let record = manager.workspace.sessions[id] else { return nil }
         let s = manager.status(id) ?? LiveStatus()
         let agent = s.agent == .shell && record.agentRunning ? record.agent : s.agent
-        return .make(title: displayTitle(record, s), status: s, agent: agent, cwd: s.cwd ?? record.cwd,
+        // Started by another open session (`corral spawn`): marked as its offshoot.
+        let child = record.parent.map { manager.workspace.sessions[$0]?.closedAt == nil && manager.workspace.sessions[$0] != nil } ?? false
+        return .make(title: (child ? Self.childMark : "") + displayTitle(record, s), status: s, agent: agent, cwd: s.cwd ?? record.cwd,
                      launching: manager.launchKind(id) ?? (manager.isPendingRestore(id) ? .resuming : nil))
     }
 

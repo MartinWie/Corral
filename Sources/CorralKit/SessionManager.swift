@@ -110,6 +110,10 @@ public struct ManagerEnvironment {
     public var store: WorkspaceStore
     public var indexPath: String
     public var socketPath: String
+    /// Socket of the `corral` command; nil (tests) opens none.
+    public var controlPath: String?
+    /// Home folder the agent skill and `~/.local/bin/corral` live under; nil (tests) never touches them.
+    public var skillHome: URL?
     public var roots: SearchIndex.Roots
     public var jobsDir: URL
     public var claudeBinary: String?
@@ -179,12 +183,15 @@ public struct ManagerEnvironment {
     }
 
     public static var standard: ManagerEnvironment {
-        ManagerEnvironment(
+        var env = ManagerEnvironment(
             store: WorkspaceStore(), indexPath: CorralPaths.index.path, socketPath: CorralPaths.socket.path,
             roots: .standard, jobsDir: BackgroundAgents.jobsDir, claudeBinary: BackgroundAgents.claudeBinary(),
             hookBinary: hookBinaryNextToExecutable(),
             notifications: Bundle.main.bundleIdentifier != nil && Bundle.main.bundleURL.pathExtension == "app",
             integrationPaths: .standard)
+        env.controlPath = CorralPaths.control.path
+        env.skillHome = FileManager.default.homeDirectoryForCurrentUser
+        return env
     }
 
     /// corral-hook next to the app binary (bundle) or in the SwiftPM build dir (dev). The executable's
@@ -219,6 +226,9 @@ final class SessionManager: TerminalActionHandler {
 
     private var observers: [(ManagerChange) -> Void] = []
     private var eventServer: EventServer?
+    private var controlServer: ControlServer?
+    /// What the `corral` command needs beyond the status (see SessionControl.swift).
+    let control = ControlState()
     private var watchers: [String: FSWatcher] = [:]
     private var backgroundLoading = false
     private var backgroundDirty = false
@@ -244,10 +254,11 @@ final class SessionManager: TerminalActionHandler {
     deinit {
         if let activationObserver { NotificationCenter.default.removeObserver(activationObserver) }
         eventServer?.stop()
+        controlServer?.stop()
     }
 
     func observe(_ fn: @escaping (ManagerChange) -> Void) { observers.append(fn) }
-    private func emit(_ c: ManagerChange) {
+    func emit(_ c: ManagerChange) {
         switch c {
         case .status, .background, .structure, .settings: updateKeepAwake()
         default: break
@@ -311,6 +322,64 @@ final class SessionManager: TerminalActionHandler {
         workspace.settings.keepAwake = on
         scheduleSave()
         emit(.settings)
+    }
+
+    func setControl(_ on: Bool) {
+        guard workspace.settings.control != on else { return }
+        workspace.settings.control = on
+        if !on { controlStopped() }
+        scheduleSave()
+        emit(.integrations)
+    }
+
+    func setSpawnNote(on: Bool, text: String) {
+        guard workspace.settings.spawnNoteOn != on || workspace.settings.spawnNote != text else { return }
+        workspace.settings.spawnNoteOn = on
+        workspace.settings.spawnNote = text
+        scheduleSave()
+        emit(.integrations)
+    }
+
+    /// See `SessionRecord.unreported`.
+    func setUnreported(_ state: String?, for id: UUID) {
+        guard workspace.sessions[id] != nil, workspace.sessions[id]?.unreported != state else { return }
+        workspace.sessions[id]?.unreported = state
+        scheduleSave()
+    }
+
+    func setControlAll(_ on: Bool) {
+        guard workspace.settings.controlAll != on else { return }
+        workspace.settings.controlAll = on
+        scheduleSave()
+        emit(.integrations)
+    }
+
+    func setTidyMinutes(_ minutes: Int) {
+        guard workspace.settings.tidyMinutes != minutes else { return }
+        workspace.settings.tidyMinutes = minutes
+        scheduleSave()
+        live.keys.forEach(scheduleTidy)
+        emit(.integrations)
+    }
+
+    func setQuietSpawned(_ on: Bool) {
+        guard workspace.settings.quietSpawned != on else { return }
+        workspace.settings.quietSpawned = on
+        scheduleSave()
+        emit(.integrations)
+    }
+
+    func setMeasure(_ on: Bool) {
+        guard workspace.settings.measure != on else { return }
+        workspace.settings.measure = on
+        scheduleSave()
+        emit(.integrations)
+    }
+
+    func setModels(_ models: AgentModels, for agent: AgentKind) {
+        guard workspace.settings.models(for: agent) != models else { return }
+        workspace.settings.models[agent.rawValue] = models
+        scheduleSave()
     }
 
     func setKeepDisplayOn(_ on: Bool) {
@@ -398,6 +467,13 @@ final class SessionManager: TerminalActionHandler {
 
         eventServer = EventServer(path: env.socketPath) { [weak self] msg in self?.handleHook(msg) }
         do { try eventServer?.start() } catch { NSLog("Corral: hook socket failed: \(error)") }
+        if let path = env.controlPath {
+            controlServer = ControlServer(path: path) { [weak self] request, connection in
+                guard let self else { return connection.reply(["ok": false, "error": "Corral is quitting"]) }
+                connection.onClose = self.handleControl(request, push: { connection.push($0) }) { connection.reply($0) }
+            }
+            do { try controlServer?.start() } catch { NSLog("Corral: control socket failed: \(error)") }
+        }
 
         ensureWatchers()
         reloadBackground()
@@ -466,7 +542,7 @@ final class SessionManager: TerminalActionHandler {
         if !FileManager.default.fileExists(atPath: cwd, isDirectory: &isDir) || !isDir.boolValue {
             cwd = NSHomeDirectory()
         }
-        var vars = ["CORRAL_SOCKET": env.socketPath]
+        var vars = ["CORRAL_SOCKET": env.socketPath, CorralCLI.sessionVariable: record.id.uuidString]
         if let hook = env.hookBinary { vars["CORRAL_HOOK"] = hook }
         var spec = LaunchSpec(cwd: cwd, agentInput: input, env: vars)
         var launch: LaunchState?
@@ -508,10 +584,65 @@ final class SessionManager: TerminalActionHandler {
 
     /// The agent showed (first output, hook, title, key press, exit…): drop the launch cover.
     func launchReady(_ id: UUID) {
-        guard let ls = live[id], ls.launch != nil else { return }
+        guard let ls = live[id], let launch = ls.launch else { return }
         ls.launch = nil
         emit(.status(id))
+        controlPublish(id)
         pumpRestores()
+        if launch.agent == .claude, launch.kind == .starting { scheduleTrustChecks(id) }
+    }
+
+    // MARK: Folder trust
+
+    /// Claude asks whether to trust a folder it hasn't worked in before it runs anything, hooks
+    /// included: without a look at the screen the session would sit there unnoticed.
+    static let trustDetail = "Trust this folder?"
+    /// Seconds after a fresh Claude start shows: two looks, no more (as bounded as the launch probe).
+    static var trustChecks: [TimeInterval] = [1, 3]
+
+    static func isTrustPrompt(_ screen: String) -> Bool {
+        screen.range(of: "trust this folder", options: .caseInsensitive) != nil
+            && screen.range(of: "Enter to confirm", options: .caseInsensitive) != nil
+    }
+
+    private func scheduleTrustChecks(_ id: UUID) {
+        for delay in Self.trustChecks {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in self?.checkTrustPrompt(id) }
+        }
+    }
+
+    /// The question is up (no hook came yet, the screen shows it): answered for a session started with
+    /// `corral spawn --trust`, else the session reads "needs input".
+    func checkTrustPrompt(_ id: UUID) {
+        guard !terminating, let ls = live[id], !ls.status.hooksSeen, ls.status.agent == .claude, ls.status.activity == .idle,
+              Self.isTrustPrompt(ls.terminal.viewportText()) else { return }
+        if control.trusted.contains(id) {
+            answerTrust(id, yes: true)
+        } else {
+            apply(.desktopNotification(title: "", body: Self.trustDetail), to: id)
+        }
+    }
+
+    /// Moves to "Yes, I trust this folder" when the pointer isn't on it, then confirms; Esc for no
+    /// (Claude then exits).
+    @discardableResult
+    func answerTrust(_ id: UUID, yes: Bool) -> Bool {
+        guard let ls = live[id] else { return false }
+        let screen = ls.terminal.viewportText()
+        guard Self.isTrustPrompt(screen) else { return false }
+        guard yes else {
+            guard ls.terminal.perform(binding: "text:\\x1b") else { return false }
+            apply(.userCancelled, to: id)
+            return true
+        }
+        let onYes = screen.components(separatedBy: "\n").contains { $0.contains("❯") && $0.range(of: "yes", options: .caseInsensitive) != nil }
+        if !onYes, !ls.terminal.perform(binding: Self.textBinding("\u{1b}[B")) { return false }
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.submitDelay) { [weak self] in
+            guard let self, let ls = self.live[id] else { return }
+            ls.terminal.perform(binding: "text:\\r")
+            self.apply(.userSubmitted, to: id)
+        }
+        return true
     }
 
     /// A hint the agent is up (a hook, a title). Enough for a fresh start; a resume or attach is
@@ -651,7 +782,7 @@ final class SessionManager: TerminalActionHandler {
     /// it would only print "No conversation found".
     func relaunch(_ record: SessionRecord, input: String?) -> (input: String?, resuming: Bool) {
         if input != nil, record.bgJobId == nil, let sid = record.agentSessionId, missingTranscript(record),
-           let fresh = record.agent.startCommand(sessionId: sid) {
+           let fresh = record.agent.startCommand(sessionId: sid, model: record.model) {
             return (fresh, false)
         }
         return (input, input != nil)
@@ -661,24 +792,43 @@ final class SessionManager: TerminalActionHandler {
         text.unicodeScalars.contains { !CharacterSet.whitespacesAndNewlines.contains($0) }
     }
 
+    /// `model`: nil starts on the agent's standard tier from Settings (if any). `prompt` and `extra`
+    /// go on the agent's command line. `parent` (`corral spawn` from a session) puts the new one right
+    /// below it. Returns the new session's id.
+    @discardableResult
     func newSession(agent: AgentKind, cwd: String? = nil, folder: UUID?? = nil, title: String = "",
-                    input: String? = nil, agentSessionId: String? = nil, bgJobId: String? = nil) {
-        let (targetFolder, index, dir) = workspace.placement(for: agent, folder: folder, cwd: cwd,
-                                                             currentDirectory: currentDirectory, home: NSHomeDirectory())
+                    input: String? = nil, agentSessionId: String? = nil, bgJobId: String? = nil,
+                    model: String? = nil, prompt: String? = nil, extra: [String] = [], parent: UUID? = nil,
+                    name: String? = nil, spawned: Bool = false, select: Bool = true) -> UUID {
+        let placed = workspace.placement(for: agent, folder: folder, cwd: cwd,
+                                         currentDirectory: currentDirectory, home: NSHomeDirectory())
+        var targetFolder = placed.folder, index = placed.index
+        let dir = placed.directory
+        if folder == nil, let parent, workspace.contains(parent) {
+            targetFolder = workspace.parent(of: parent) ?? nil
+            index = workspace.children(of: targetFolder).firstIndex { $0.id == parent }.map { $0 + 1 }
+        }
         let resuming = agentSessionId != nil
         var input = input, agentSessionId = agentSessionId
-        // A fresh Claude session gets its id now, so it resumes after a relaunch even without hooks.
+        let model = input == nil ? model ?? workspace.settings.model(for: agent, named: nil) : nil
         if input == nil, agentSessionId == nil {
-            let sid = UUID().uuidString.lowercased()
-            if let command = agent.startCommand(sessionId: sid) { (input, agentSessionId) = (command, sid) }
+            // A fresh Claude session gets its id now, so it resumes after a relaunch even without hooks.
+            let sid = agent == .claude ? UUID().uuidString.lowercased() : nil
+            input = agent.startInput(sessionId: sid, model: model, prompt: prompt, extra: extra)
+            agentSessionId = sid
         }
         var record = SessionRecord(cwd: dir, agent: agent, title: title, agentSessionId: agentSessionId)
         record.bgJobId = bgJobId
+        record.model = model
+        record.parent = parent
+        if spawned { record.spawned = true }
+        if let name, !name.isEmpty { record.customName = name }
         if agentSessionId != nil { record.agentCwd = dir }
         workspace.addSession(record, in: targetFolder, at: index)
         spawn(record, input: input ?? agent.launchCommand, resuming: resuming)
         emit(.structure)
-        select(record.id)
+        if select { self.select(record.id) } else { scheduleSave() }
+        return record.id
     }
 
     var currentDirectory: String? {
@@ -704,6 +854,7 @@ final class SessionManager: TerminalActionHandler {
     }
 
     func close(_ id: UUID) {
+        controlClosed(id)
         pendingRestore.removeAll { $0 == id }
         backgroundHolds[id] = nil
         if let ls = live[id] {
@@ -828,8 +979,9 @@ final class SessionManager: TerminalActionHandler {
     }
 
     @discardableResult
-    func newFolder(name: String = "New Folder", in parent: UUID? = nil, directory: String? = nil) -> UUID {
-        let folder = Folder(name: name, directory: directory)
+    func newFolder(name: String = "New Folder", in parent: UUID? = nil, directory: String? = nil, auto: Bool = false) -> UUID {
+        var folder = Folder(name: name, directory: directory)
+        if auto { folder.auto = true }
         workspace.addFolder(folder, in: parent)
         emit(.structure)
         scheduleSave()
@@ -852,6 +1004,12 @@ final class SessionManager: TerminalActionHandler {
         guard let current = workspace.folders[id]?.expanded, current != expanded else { return }
         workspace.folders[id]?.expanded = expanded
         scheduleSave()
+    }
+
+    /// From outside the sidebar (`corral folder collapse`): the sidebar follows.
+    func showFolder(_ id: UUID, expanded: Bool) {
+        setExpanded(id, expanded)
+        emit(.structure)
     }
 
     func deleteFolder(_ id: UUID) {
@@ -987,12 +1145,15 @@ final class SessionManager: TerminalActionHandler {
         // A hook is a sign of life even when the status stays "working" (tool after tool in a long turn).
         if case .hook = signal, workspace.settings.keepAwake { updateKeepAwake() }
         guard ls.status != before else { return }
+        controlStatusChanged(id, before: before, after: ls.status)
         syncRecord(id, from: ls.status)
         if ls.status.activity != before.activity || ls.status.unread != before.unread || ls.status.promptId != before.promptId {
             notifyIfNeeded(id, before: before, after: ls.status)
             updateBadge()
         }
         emit(.status(id))
+        controlCheck(id)
+        controlSettled(id)
     }
 
     private func syncRecord(_ id: UUID, from s: LiveStatus) {
@@ -1026,6 +1187,7 @@ final class SessionManager: TerminalActionHandler {
 
     func handleHook(_ msg: HookWire.Message) {
         onHook?(msg)
+        controlNote(msg)
         // An agent started in a split pane becomes a session of its own.
         if panes[msg.surface] != nil, msg.event.agent != .shell { promotePane(msg.surface, agent: msg.event.agent) }
         if Self.endsTurn(msg.event), holdForBackground(msg.surface, end: msg.event) {
@@ -1293,10 +1455,25 @@ final class SessionManager: TerminalActionHandler {
     private func notifyIfNeeded(_ id: UUID, before: LiveStatus, after: LiveStatus) {
         guard env.notifications else { return }
         let prefs = workspace.settings.notifications
-        if let kind = Self.notificationKind(before: before, after: after), prefs[kind].on, !isFocused(id),
+        control.quiet.removeValue(forKey: id)?.cancel()
+        // Not for what an orchestrator is waiting to handle itself (`corral wait`).
+        if let kind = Self.notificationKind(before: before, after: after), prefs[kind].on, !isFocused(id), !controlWatched(id),
            prefs.whileActive || !env.appIsActive(), let record = workspace.sessions[id] {
-            env.notifier.post(Self.note(kind, session: id, record: record, status: after, sound: prefs[kind].sound,
-                                        details: prefs.showDetails))
+            let post = { [env] (status: LiveStatus) in
+                env.notifier.post(Self.note(kind, session: id, record: record, status: status, sound: prefs[kind].sound,
+                                            details: prefs.showDetails))
+            }
+            // Sessions started through `corral` stay quiet when the user asked for that: a failure is
+            // news at once, a prompt only once it has waited (an orchestrator usually answers it).
+            guard workspace.settings.quietSpawned, record.spawned == true, kind != .failed else { return post(after) }
+            guard kind == .permission || kind == .question else { return }
+            let work = DispatchWorkItem { [weak self] in
+                guard let self, let now = self.live[id]?.status, now.activity == .needsInput, now.since == after.since else { return }
+                self.control.quiet[id] = nil
+                post(now)
+            }
+            control.quiet[id] = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.quietWait, execute: work)
         } else if before.activity == .needsInput, after.activity != .needsInput {
             // Answered or gone: its question leaves Notification Center too.
             removeNotification(id)
@@ -1307,6 +1484,9 @@ final class SessionManager: TerminalActionHandler {
         guard env.notifications else { return }
         env.notifier.withdraw([id.uuidString])
     }
+
+    /// How long a prompt of a quiet session (`AppSettings.quietSpawned`) waits before the user hears of it.
+    static var quietWait: TimeInterval = 5 * 60
 
     static let testNote = CorralNote(id: "corral-test", title: "Corral", subtitle: "Notifications are on",
                                      body: "Click one to jump straight to its session.", sound: true, session: nil)

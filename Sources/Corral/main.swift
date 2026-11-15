@@ -1,6 +1,12 @@
 import AppKit
 import CorralKit
+import CorralCore
 import GhosttyKit
+
+// `corral spawn|list|wait|…` (the binary behind ~/.local/bin/corral): ask the running app, print, exit.
+if let status = CorralCLI.main(Array(CommandLine.arguments.dropFirst())) { exit(status) }
+// Started from an agent's shell: its session variables must not reach the terminals.
+CorralCLI.leaveAgentSession()
 
 // Ghostty finds shell integration, themes and terminfo through its resources dir. The app bundle
 // carries the copy matching its libghostty, used even when started from a Ghostty terminal (which

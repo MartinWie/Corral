@@ -30,6 +30,14 @@ public enum HookWire {
         if agent == .claude, name == "PermissionRequest", let tool = str(payload["tool_name"]) {
             e.tool = tool
             if e.message == nil { e.message = permissionDetail(tool: tool, input: payload["tool_input"] as? [String: Any]) }
+            if let input = payload["tool_input"], JSONSerialization.isValidJSONObject(input),
+               let data = try? JSONSerialization.data(withJSONObject: input, options: [.sortedKeys, .withoutEscapingSlashes]) {
+                e.toolInput = String(String(decoding: data, as: UTF8.self).prefix(maxToolInput))
+            }
+        }
+        if agent == .claude {
+            e.transcriptPath = str(payload["transcript_path"])
+            if name == "Stop" { e.lastMessage = str(payload["last_assistant_message"]).map { String($0.prefix(maxResult)) } }
         }
         e.isSubSession = (str(payload["parent_id"]) != nil)
         if name == AgentLaunch.exitEvent, let code = payload["exit"] as? NSNumber,
@@ -38,6 +46,10 @@ public enum HookWire {
         }
         return Message(surface: surface, event: e)
     }
+
+    /// Caps on what a hook may leave in memory per session.
+    static let maxToolInput = 8_000
+    public static let maxResult = 20_000
 
     public static func encode(surface: String, agent: String, event: String, payload: Any?) -> Data? {
         var obj: [String: Any] = ["surface": surface, "agent": agent, "event": event]
@@ -49,7 +61,7 @@ public enum HookWire {
 
     /// What a permission prompt is about, in one line: "Bash: git push", "Edit: Model.swift", the question
     /// AskUserQuestion puts. Falls back to "Permission: <tool>".
-    static func permissionDetail(tool: String, input: [String: Any]?) -> String {
+    public static func permissionDetail(tool: String, input: [String: Any]?) -> String {
         let input = input ?? [:]
         let text: String?
         switch tool {

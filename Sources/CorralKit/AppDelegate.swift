@@ -92,6 +92,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificat
             UNUserNotificationCenter.current().setNotificationCategories(Notifier.categories)
         }
         manager.start()
+        // Installed skill copies follow this version's text, the command's link the app's location.
+        if benchOutput == nil, let home = manager.env.skillHome {
+            AgentSkill.refreshInstalled(home: home, claudeDir: manager.env.integrationPaths.claudeSettings.deletingLastPathComponent())
+        }
         if let benchOutput {
             // Invisible but on screen, so terminals render like in normal use; never takes focus.
             main.window?.alphaValue = 0

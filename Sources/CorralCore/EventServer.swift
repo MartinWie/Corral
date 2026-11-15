@@ -25,16 +25,9 @@ public final class EventServer {
 
         fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { throw POSIXError(.init(rawValue: errno) ?? .EIO) }
-        var addr = sockaddr_un()
-        addr.sun_family = sa_family_t(AF_UNIX)
-        let bytes = Array(path.utf8)
-        guard bytes.count < MemoryLayout.size(ofValue: addr.sun_path) else {
+        guard var addr = UnixSocket.address(path) else {
             close(fd); fd = -1
             throw POSIXError(.ENAMETOOLONG)
-        }
-        withUnsafeMutableBytes(of: &addr.sun_path) { buf in
-            buf.copyBytes(from: bytes)
-            buf[bytes.count] = 0
         }
         let len = socklen_t(MemoryLayout<sockaddr_un>.size)
         let rc = withUnsafePointer(to: &addr) {
@@ -110,28 +103,13 @@ public enum EventClient {
         setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
         var noSigPipe: Int32 = 1
         setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, socklen_t(MemoryLayout<Int32>.size))
-        var addr = sockaddr_un()
-        addr.sun_family = sa_family_t(AF_UNIX)
-        let bytes = Array(path.utf8)
-        guard bytes.count < MemoryLayout.size(ofValue: addr.sun_path) else { return false }
-        withUnsafeMutableBytes(of: &addr.sun_path) { buf in
-            buf.copyBytes(from: bytes)
-            buf[bytes.count] = 0
-        }
+        guard var addr = UnixSocket.address(path) else { return false }
         let rc = withUnsafePointer(to: &addr) {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
                 connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
             }
         }
         guard rc == 0 else { return false }
-        return data.withUnsafeBytes { raw in
-            var off = 0
-            while off < raw.count {
-                let n = write(fd, raw.baseAddress! + off, raw.count - off)
-                if n <= 0 { return false }
-                off += n
-            }
-            return true
-        }
+        return UnixSocket.write(data, to: fd)
     }
 }

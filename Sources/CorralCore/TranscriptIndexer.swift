@@ -337,3 +337,24 @@ enum TranscriptIndexer {
         return String(line.trimmingCharacters(in: .whitespaces).prefix(160))
     }
 }
+
+/// The end of a Claude transcript, for `corral` when the Stop hook carried no closing message.
+public enum TranscriptTail {
+    /// The last assistant text of the main conversation within the file's last `window` bytes.
+    public static func lastAssistantText(path: String, window: Int = 512 * 1024) -> String? {
+        guard let handle = FileHandle(forReadingAtPath: path) else { return nil }
+        defer { try? handle.close() }
+        let size = (try? handle.seekToEnd()) ?? 0
+        try? handle.seek(toOffset: size > UInt64(window) ? size - UInt64(window) : 0)
+        guard let data = try? handle.readToEnd() else { return nil }
+        for line in data.split(separator: 0x0A).reversed() {
+            guard let obj = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any],
+                  obj["type"] as? String == "assistant", obj["isSidechain"] as? Bool != true,
+                  let content = (obj["message"] as? [String: Any])?["content"] as? [[String: Any]] else { continue }
+            let text = content.compactMap { $0["type"] as? String == "text" ? $0["text"] as? String : nil }
+                .joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+            if !text.isEmpty { return String(text.prefix(HookWire.maxResult)) }
+        }
+        return nil
+    }
+}

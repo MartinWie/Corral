@@ -77,6 +77,12 @@ public struct HookEvent: Codable, Equatable, Sendable {
     public var trigger: String?
     /// Claude PermissionRequest tool (AskUserQuestion and ExitPlanMode ask, they don't need permission).
     public var tool: String?
+    /// Claude PermissionRequest: the tool's input as JSON, for whoever answers through `corral`.
+    public var toolInput: String?
+    /// Claude Stop: the turn's closing message.
+    public var lastMessage: String?
+    /// Claude: the conversation's transcript file.
+    public var transcriptPath: String?
     public var isSubSession: Bool
     /// Agent exit status (`CorralAgentExit`, sent by the direct launch script).
     public var exitCode: Int?

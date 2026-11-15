@@ -23,22 +23,91 @@ public enum AgentKind: String, Codable, CaseIterable, Sendable {
         }
     }
 
-    /// Command that resumes an existing agent session; the terminal falls back to a shell when the
-    /// agent exits.
     /// A fresh session under an id Corral picks, so it can be resumed without the status hooks
     /// (Claude Code only: the others choose their own ids).
-    public func startCommand(sessionId: String) -> String? {
-        self == .claude ? "claude --session-id \(shellQuote(sessionId))" : nil
+    public func startCommand(sessionId: String, model: String? = nil) -> String? {
+        self == .claude ? startInput(sessionId: sessionId, model: model) : nil
     }
 
-    public func resumeCommand(sessionId: String) -> String? {
+    /// The command line that starts the agent: on `model`, with `extra` arguments and a first prompt.
+    public func startInput(sessionId: String? = nil, model: String? = nil, prompt: String? = nil,
+                           extra: [String] = []) -> String? {
+        guard var command = launchCommand else { return nil }
+        if self == .claude, let sessionId { command += " --session-id \(shellQuote(sessionId))" }
+        if let model, !model.isEmpty { command += " --model \(shellQuote(model))" }
+        for arg in extra { command += " \(shellQuote(arg))" }
+        if let prompt, !prompt.isEmpty {
+            // A prompt starting with "-" (a list) must not read as an option.
+            let text = prompt.hasPrefix("-") ? " " + prompt : prompt
+            command += self == .opencode ? " --prompt=\(shellQuote(text))" : " \(shellQuote(text))"
+        }
+        return command
+    }
+
+    /// Command that resumes an existing agent session; the terminal falls back to a shell when the
+    /// agent exits.
+    public func resumeCommand(sessionId: String, model: String? = nil) -> String? {
         let id = shellQuote(sessionId)
+        let on = model.flatMap { $0.isEmpty ? nil : " --model \(shellQuote($0))" } ?? ""
         switch self {
         case .shell: return nil
-        case .claude: return "claude --resume \(id)"
-        case .opencode: return "opencode -s \(id)"
-        case .pi: return "pi --session \(id)"
+        case .claude: return "claude --resume \(id)\(on)"
+        case .opencode: return "opencode -s \(id)\(on)"
+        case .pi: return "pi --session \(id)\(on)"
         }
+    }
+}
+
+/// The three model slots `corral spawn --model` names, set per agent in Settings › Agents.
+public enum ModelTier: String, Codable, CaseIterable, Sendable {
+    case easy, medium, high
+
+    public var title: String { rawValue.capitalized }
+}
+
+/// An agent's model per tier ("" = the agent's own default) and the tier new sessions start on.
+public struct AgentModels: Codable, Equatable, Sendable {
+    public var easy = ""
+    public var medium = ""
+    public var high = ""
+    /// Tier for sessions started without one (menu, `corral spawn` without `--model`); nil = the agent decides.
+    public var standard: ModelTier?
+
+    public init(easy: String = "", medium: String = "", high: String = "", standard: ModelTier? = nil) {
+        self.easy = easy
+        self.medium = medium
+        self.high = high
+        self.standard = standard
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        easy = try c.decodeIfPresent(String.self, forKey: .easy) ?? ""
+        medium = try c.decodeIfPresent(String.self, forKey: .medium) ?? ""
+        high = try c.decodeIfPresent(String.self, forKey: .high) ?? ""
+        standard = try? c.decodeIfPresent(ModelTier.self, forKey: .standard)
+    }
+
+    public subscript(tier: ModelTier) -> String {
+        get {
+            switch tier {
+            case .easy: return easy
+            case .medium: return medium
+            case .high: return high
+            }
+        }
+        set {
+            switch tier {
+            case .easy: easy = newValue
+            case .medium: medium = newValue
+            case .high: high = newValue
+            }
+        }
+    }
+
+    /// Until the user sets them: Claude Code's own aliases; the other agents name models per provider.
+    public static func defaults(for agent: AgentKind) -> AgentModels {
+        agent == .claude ? AgentModels(easy: "haiku", medium: "sonnet", high: "opus") : AgentModels()
     }
 }
 
@@ -84,6 +153,15 @@ public struct SessionRecord: Codable, Identifiable, Equatable, Sendable {
     public var agentCwd: String?
     /// Claude background job this session is attached to (`claude attach`).
     public var bgJobId: String?
+    /// Model the session was started on (a tier's or one named to `corral spawn`): resumes keep it.
+    public var model: String?
+    /// Session that started this one through `corral spawn`; it hears about this one's prompts and end.
+    public var parent: UUID?
+    /// Started through `corral spawn` (by a session or a script): what auto-close and quiet notifications apply to.
+    public var spawned: Bool?
+    /// How the session ended a turn ("done", "error", "exited") while nobody waited for it with
+    /// `corral wait`: reported by the next wait, also after a restart.
+    public var unreported: String?
     /// True while the agent process was running; decides whether restore resumes it.
     public var agentRunning: Bool
     public var createdAt: Date
@@ -134,7 +212,7 @@ public struct SessionRecord: Codable, Identifiable, Equatable, Sendable {
         guard agentRunning else { return nil }
         if let job = bgJobId { return Self.attachOrResume(job: job, sessionId: agentSessionId) }
         guard let sid = agentSessionId else { return nil }
-        return agent.resumeCommand(sessionId: sid)
+        return agent.resumeCommand(sessionId: sid, model: model)
     }
 
     /// Working directory for a new terminal that runs `input`.
@@ -146,7 +224,7 @@ public struct SessionRecord: Codable, Identifiable, Equatable, Sendable {
     public var reopenInput: String? {
         if let job = bgJobId { return Self.attachOrResume(job: job, sessionId: agentSessionId) }
         guard let sid = agentSessionId else { return nil }
-        return agent.resumeCommand(sessionId: sid)
+        return agent.resumeCommand(sessionId: sid, model: model)
     }
 
     /// Attach to a background job; after a reboot the job is gone, so restart it in the background first.
@@ -165,6 +243,8 @@ public struct Folder: Codable, Identifiable, Equatable, Sendable {
     public var expanded: Bool
     /// Default working directory for sessions created inside this folder.
     public var directory: String?
+    /// Made by the `corral` command: removed again once auto-close has emptied it.
+    public var auto: Bool?
 
     public init(id: UUID = UUID(), name: String, expanded: Bool = true, directory: String? = nil) {
         self.id = id

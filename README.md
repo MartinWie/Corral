@@ -35,6 +35,25 @@ only network request it makes.
 
 Corral uses your Ghostty config (theme, font, keybinds) and your shell setup.
 
+## Agents that start agents
+
+Turn on **Settings › Agents › Command line** and install the skill there. A session can then hand work
+to others and watch them, and so can a script:
+
+```sh
+corral spawn --model easy --name "Check the logs" "Why did the nightly import fail? Report the cause."
+corral wait        # returns when a session you started needs permission, asks something or is done
+corral approve ID  # or: deny, send, output, list, status, close
+corral folder move "Nightly/Checks" ID   # group sessions in sidebar folders, collapse what you don't need to see
+corral events --json   # every state change as a line: one watcher for many sessions
+corral stats       # token use per session and flagged waste (Settings › Agents › Measure sessions)
+```
+
+Scripts get the outcome as exit status (`corral spawn --wait --done …`) or as `--json`.
+
+`easy`, `medium` and `high` are the models you set per agent in Settings. The command is the app
+itself (`~/.local/bin/corral`), so there is nothing else to install.
+
 ## Build from source
 
 ```sh
