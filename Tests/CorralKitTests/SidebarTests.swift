@@ -244,6 +244,46 @@ struct SidebarTests {
         #expect(s.outlineView(o, pasteboardWriterForItem: s.node(.closedHeader)) == nil)
     }
 
+    @Test func folderDropsBesideAnotherFolder() {
+        let (f, s, w) = makeWindowed()
+        defer { w.close(); f.cleanup() }
+        let a = f.manager.newFolder(name: "A")
+        let b = f.manager.newFolder(name: "B")
+        f.manager.newSession(agent: .shell, cwd: f.dir.path, folder: .some(b))
+        f.manager.setExpanded(b, true)
+        settle(w)
+        let drag = FakeDrag(token: "f:\(a.uuidString)")
+        let rect = s.outline.rect(ofRow: row(s, .folder(b)))
+        func at(_ fraction: CGFloat) -> (item: Any?, index: Int)? {
+            let y = s.outline.isFlipped ? rect.minY + rect.height * fraction : rect.maxY - rect.height * fraction
+            drag.location = s.outline.convert(NSPoint(x: rect.midX, y: y), to: nil)
+            return s.besideFolder(drag, dragged: a)
+        }
+        let bIndex = f.manager.workspace.tree.firstIndex { $0.id == b }!
+        #expect(at(0.9)?.item == nil && at(0.9)?.index == bIndex + 1, "bottom third: after B, same level")
+        #expect(at(0.1)?.item == nil && at(0.1)?.index == bIndex, "top third: before B")
+        #expect(at(0.5) == nil, "middle: into B")
+
+        // The mark shows the landing spot: a line below B's contents at B's level, or B highlighted.
+        let child = s.outline.rect(ofRow: row(s, .folder(b)) + 1)
+        _ = at(0.9)
+        #expect(s.outlineView(s.outline, validateDrop: drag, proposedItem: s.node(.folder(b)), proposedChildIndex: -1) == .move)
+        #expect(s.outline.dropMark == .line(y: child.maxY, x: SidebarOutlineView.cellX(level: 0)))
+        _ = at(0.5)
+        _ = s.outlineView(s.outline, validateDrop: drag, proposedItem: s.node(.folder(b)), proposedChildIndex: -1)
+        #expect(s.outline.dropMark == .into(row: row(s, .folder(b))))
+        _ = at(0.1)
+        _ = s.outlineView(s.outline, validateDrop: drag, proposedItem: s.node(.folder(b)), proposedChildIndex: -1)
+        #expect(s.outline.dropMark == .line(y: rect.minY, x: SidebarOutlineView.cellX(level: 0)))
+        s.outline.draggingExited(drag)
+        #expect(s.outline.dropMark == .none)
+
+        // Accepting the retargeted drop puts A after B at the root, not inside it.
+        #expect(s.outlineView(s.outline, acceptDrop: drag, item: nil, childIndex: bIndex + 1))
+        let ids = f.manager.workspace.tree.map(\.id)
+        #expect(ids.firstIndex(of: a) == ids.firstIndex(of: b).map { $0 + 1 })
+    }
+
     @Test func contextMenusAndActions() {
         let (f, s) = make()
         defer { f.cleanup() }

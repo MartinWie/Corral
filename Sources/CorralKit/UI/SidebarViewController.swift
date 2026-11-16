@@ -776,6 +776,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         guard let rv = rowView as? SidebarRowView else { return }
         let hovered = row == outline.hoveredRow
         rv.hovered = hovered
+        rv.dropTarget = outline.dropMark == .into(row: row)
         (rv.cellView as? SidebarCell)?.setHovered(hovered, animated: false)
         rv.syncCell()
     }
@@ -1241,21 +1242,59 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         }
     }
 
+    /// A folder dragged over the top or bottom third of another folder's row lands before or after it,
+    /// only the middle drops it in (AppKit nests below an open folder's row and on most of the row).
+    func besideFolder(_ info: NSDraggingInfo, dragged: UUID) -> (item: Any?, index: Int)? {
+        let point = outline.convert(info.draggingLocation, from: nil)
+        let row = outline.row(at: point)
+        guard row >= 0, let n = outline.item(atRow: row) as? SidebarNode, case .folder(let id) = n.kind,
+              id != dragged else { return nil }
+        let rect = outline.rect(ofRow: row)
+        var fraction = (point.y - rect.minY) / max(rect.height, 1)
+        if !outline.isFlipped { fraction = 1 - fraction }
+        guard fraction < 1 / 3 || fraction > 2 / 3, let parent = manager.workspace.parent(of: id),
+              let i = manager.workspace.children(of: parent).firstIndex(where: { $0.id == id }) else { return nil }
+        return (parent.flatMap { nodes[.folder($0)] }, fraction > 2 / 3 ? i + 1 : i)
+    }
+
     func outlineView(_ outlineView: NSOutlineView, validateDrop info: NSDraggingInfo,
                      proposedItem item: Any?, proposedChildIndex index: Int) -> NSDragOperation {
-        guard let drag = dragged(info), let dest = destination(item: item, index: index) else { return [] }
+        guard let drag = dragged(info) else { outline.showDrop(.none); return [] }
+        var item = item, index = index
+        if drag.kind == "f", let beside = besideFolder(info, dragged: drag.id) { (item, index) = beside }
+        guard let dest = destination(item: item, index: index) else { outline.showDrop(.none); return [] }
         if drag.kind == "f", let target = dest.folder {
             // No folder into itself or its descendants.
             var current: UUID? = target
             while let c = current {
-                if c == drag.id { return [] }
+                if c == drag.id { outline.showDrop(.none); return [] }
                 current = manager.workspace.parent(of: c) ?? nil
             }
         }
-        // Retarget so the insertion line shows where the item really lands.
+        // Retarget so the drop lands where the mark shows.
         let targetNode: SidebarNode? = dest.folder.flatMap { nodes[.folder($0)] }
         outlineView.setDropItem(targetNode, dropChildIndex: dest.index ?? NSOutlineViewDropOnItemIndex)
+        outline.showDrop(dropMark(folder: targetNode, index: dest.index))
         return .move
+    }
+
+    /// The line where child `index` of `folder` (nil = top level) would go; nil index = into the folder.
+    func dropMark(folder: SidebarNode?, index: Int?) -> SidebarOutlineView.DropMark {
+        let folderRow = folder.map { outline.row(forItem: $0) } ?? -1
+        // Top level: the tree's nodes come first in `roots`, before the section headers.
+        let children = folder?.children ?? Array(roots.prefix(manager.workspace.tree.count))
+        let into: SidebarOutlineView.DropMark = folderRow >= 0 ? .into(row: folderRow) : .none
+        guard let index, folder == nil || outline.isItemExpanded(folder) else { return into }
+        let x = SidebarOutlineView.cellX(level: folder == nil ? 0 : outline.effectiveLevel(folderRow) + 1)
+        if index < children.count {
+            let row = outline.row(forItem: children[index])
+            return row >= 0 ? .line(y: outline.rect(ofRow: row).minY, x: x) : into
+        }
+        // After the last child: below everything it shows.
+        var last = children.last ?? folder
+        while let n = last, outline.isItemExpanded(n), let child = n.children.last { last = child }
+        guard let end = last.map({ outline.row(forItem: $0) }), end >= 0 else { return into }
+        return .line(y: outline.rect(ofRow: end).maxY, x: x)
     }
 
     func outlineView(_ outlineView: NSOutlineView, acceptDrop info: NSDraggingInfo, item: Any?, childIndex index: Int) -> Bool {

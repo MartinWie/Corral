@@ -299,7 +299,7 @@ struct ViewTests {
         #expect(o.selectionHighlightStyle == .none, "the row view draws selection itself")
         #expect(o.intercellSpacing == .zero)
         #expect(o.indentationPerLevel == 14)
-        #expect(o.draggingDestinationFeedbackStyle == .gap)
+        #expect(o.draggingDestinationFeedbackStyle == .none, "own drop marks")
         #expect(o.frameOfOutlineCell(atRow: 0) == .zero)
         #expect(SidebarOutlineView.cellX(level: 0) == 14)
         #expect(SidebarOutlineView.cellX(level: 2) == 42)

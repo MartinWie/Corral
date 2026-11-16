@@ -222,7 +222,8 @@ final class FakeDrag: NSObject, NSDraggingInfo {
     }
     var draggingDestinationWindow: NSWindow? { nil }
     var draggingSourceOperationMask: NSDragOperation { .move }
-    var draggingLocation: NSPoint { .zero }
+    var location: NSPoint = .zero
+    var draggingLocation: NSPoint { location }
     var draggedImageLocation: NSPoint { .zero }
     var draggedImage: NSImage? { nil }
     var draggingPasteboard: NSPasteboard { pasteboard }

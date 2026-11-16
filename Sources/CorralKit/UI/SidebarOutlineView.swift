@@ -114,8 +114,6 @@ enum SidebarFX {
 
 /// Plain outline with our own row view: no system selection, custom cell geometry, hover tracking.
 final class SidebarOutlineView: NSOutlineView {
-    /// `.gap` drop feedback; set false to fall back to `.regular` (spec §5.15).
-    static var gapFeedback = true
     /// Leading cell origin at level 0 and the trailing margin.
     static let margin: CGFloat = 14
 
@@ -144,7 +142,64 @@ final class SidebarOutlineView: NSOutlineView {
         focusRingType = .none
         headerView = nil
         usesAutomaticRowHeights = false
-        draggingDestinationFeedbackStyle = Self.gapFeedback ? .gap : .regular
+        // Own feedback (`showDrop`): `.gap` slid rows away under the pointer, so the drop it then
+        // proposed was for a different row.
+        draggingDestinationFeedbackStyle = .none
+    }
+
+    // MARK: Drop feedback
+
+    /// Where a drop would land: highlight on `row` (into it) or a line at `line` (y, leading x).
+    enum DropMark: Equatable {
+        case none
+        case into(row: Int)
+        case line(y: CGFloat, x: CGFloat)
+    }
+
+    private(set) var dropMark = DropMark.none
+    private var dropRow = -1
+    private lazy var dropLine: NSView = {
+        let v = NSView()
+        v.wantsLayer = true
+        v.layer?.cornerRadius = 1
+        v.isHidden = true
+        addSubview(v)
+        return v
+    }()
+
+    func showDrop(_ mark: DropMark) {
+        guard mark != dropMark else { return }
+        dropMark = mark
+        if dropRow >= 0, dropRow < numberOfRows { (rowView(atRow: dropRow, makeIfNecessary: false) as? SidebarRowView)?.dropTarget = false }
+        dropRow = -1
+        switch mark {
+        case .none:
+            dropLine.isHidden = true
+        case .into(let row):
+            dropLine.isHidden = true
+            dropRow = row
+            (rowView(atRow: row, makeIfNecessary: false) as? SidebarRowView)?.dropTarget = true
+        case .line(let y, let x):
+            dropLine.layer?.backgroundColor = Theme.tokens.accent.cgColor
+            dropLine.frame = NSRect(x: x, y: y - 1, width: max(0, bounds.width - x - Self.margin), height: 2)
+            dropLine.isHidden = false
+            if dropLine !== subviews.last { addSubview(dropLine, positioned: .above, relativeTo: nil) }
+        }
+    }
+
+    override func draggingExited(_ sender: NSDraggingInfo?) {
+        super.draggingExited(sender)
+        showDrop(.none)
+    }
+
+    override func draggingEnded(_ sender: NSDraggingInfo) {
+        super.draggingEnded(sender)
+        showDrop(.none)
+    }
+
+    override func concludeDragOperation(_ sender: NSDraggingInfo?) {
+        super.concludeDragOperation(sender)
+        showDrop(.none)
     }
 
     // MARK: Geometry
