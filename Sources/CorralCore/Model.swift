@@ -245,6 +245,8 @@ public struct Folder: Codable, Identifiable, Equatable, Sendable {
     public var directory: String?
     /// Made by the `corral` command: removed again once auto-close has emptied it.
     public var auto: Bool?
+    /// The session whose `corral spawn`s go here when they name no folder.
+    public var owner: UUID?
 
     public init(id: UUID = UUID(), name: String, expanded: Bool = true, directory: String? = nil) {
         self.id = id

@@ -228,7 +228,8 @@ image metadata) or build output. `scripts/leak-scan.py` checks shipped files; ex
   unless `AppSettings.controlAll`. Folders are addressed by path (`resolveFolder`); a folder
   opened or closed outside the sidebar (`showFolder`) needs the reload `reload` now does when the
   outline's expansion differs from the model (AppKit keeps an item's expansion across `reloadData`, so
-  `expand` also collapses). Tests get no control socket and no skill home unless they set
+  `expand` also collapses). A spawn without `--folder` always lands in a folder (`spawnFolder`: the
+  caller's own via `Folder.owner`, else "Automated"). Tests get no control socket and no skill home unless they set
   `controlPath` / `skillHome`.
 - Settings rows: a wrapping caption must get its width from constraints (row/page), never from its
   text, and never set `preferredMaxLayoutWidth` during layout (the window then loops on constraint

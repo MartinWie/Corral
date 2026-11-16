@@ -196,7 +196,9 @@ when Corral isn't running it starts it with `open -g`.
 - `folder list|create|move|collapse|expand|rename|delete` and `spawn --folder` work on sidebar
   folders by path ("Monitoring/Disk": names from the top, matched without case, missing ones made by
   `move`, `create` and `spawn`). Deleting a folder keeps its sessions. The sidebar follows a collapse
-  from outside with a reload.
+  from outside with a reload. A spawn without `--folder` is always grouped (`spawnFolder`): into the
+  caller's own folder ("<title> · agents", `Folder.owner`, made right below the caller and reused while it
+  exists), or "Automated" for callers outside Corral. Both are `auto`: auto-close removes them once empty.
 - Folder trust: Claude asks whether to trust a folder it hasn't worked in before any hook runs. After
   a fresh Claude start shows, the screen is looked at twice (1 s and 3 s later, `checkTrustPrompt`);
   with the question up the session reads "needs input: Trust this folder?", `approve` answers yes

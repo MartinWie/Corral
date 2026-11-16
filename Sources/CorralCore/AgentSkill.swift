@@ -114,7 +114,7 @@ public enum AgentSkill {
     - Wait: without ids it watches what you started. Run it as a background command, handle the event, run it again; each event comes once. `--done` returns only at the end and leaves prompts to the user.
     - Events: `needs_permission` shows `request:` (tool and input); `needs_input` is a question (read it with `output ID --screen`); `done` has `result:` and the child's `report:`. From scripts `spawn --wait --done` blocks; exit status 0 done, 3 reported failed, 10 permission, 11 input, 12 error, 13 gone, 124 timeout.
     - You may approve, type into and close only sessions you started. Approve what you would run yourself for the task you gave; deny or leave the rest for the user.
-    - Group what you start in folders and collapse what the user needn't see. Close sessions you are done with; don't spawn what you can do faster yourself.
+    - Without `--folder` what you start goes in a folder of yours below you; collapse what the user needn't see. Close sessions you are done with; don't spawn what you can do faster yourself.
     """
 }
 

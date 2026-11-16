@@ -979,10 +979,12 @@ final class SessionManager: TerminalActionHandler {
     }
 
     @discardableResult
-    func newFolder(name: String = "New Folder", in parent: UUID? = nil, directory: String? = nil, auto: Bool = false) -> UUID {
+    func newFolder(name: String = "New Folder", in parent: UUID? = nil, at index: Int? = nil, directory: String? = nil,
+                   auto: Bool = false, owner: UUID? = nil) -> UUID {
         var folder = Folder(name: name, directory: directory)
         if auto { folder.auto = true }
-        workspace.addFolder(folder, in: parent)
+        folder.owner = owner
+        workspace.addFolder(folder, in: parent, at: index)
         emit(.structure)
         scheduleSave()
         return folder.id

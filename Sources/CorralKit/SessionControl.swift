@@ -420,10 +420,12 @@ extension SessionManager {
             if let prompt, prompt.utf8.count > Self.maxPrompt {
                 return fail("The prompt is too long for a command line. Put it in a file and tell the session to read it.")
             }
-            var folder: UUID??
+            let folder: UUID
             if let path = request["folder"] as? String {
                 guard let id = resolveFolder(path, create: true) else { return fail("--folder needs a name, like Monitoring/Disk.") }
-                folder = .some(id)
+                folder = id
+            } else {
+                folder = spawnFolder(for: caller)
             }
             var note: String?
             if !integrations.installed(agent) {
@@ -528,6 +530,20 @@ extension SessionManager {
             current = workspace.parent(of: folder) ?? nil
         }
         return names.joined(separator: "/")
+    }
+
+    static let scriptFolder = "Automated"
+
+    /// Where a spawn without `--folder` goes, so started sessions are always grouped: a folder of the
+    /// caller's own, right below it (reused while it exists), or "Automated" for scripts.
+    func spawnFolder(for caller: UUID?) -> UUID {
+        guard let caller, workspace.contains(caller), let record = workspace.sessions[caller] else {
+            return resolveFolder(Self.scriptFolder, create: true)!
+        }
+        if let own = workspace.folders.values.first(where: { $0.owner == caller && workspace.contains($0.id) }) { return own.id }
+        let parent = workspace.parent(of: caller) ?? nil
+        let index = workspace.children(of: parent).firstIndex { $0.id == caller }.map { $0 + 1 }
+        return newFolder(name: "\(record.displayTitle) · agents", in: parent, at: index, auto: true, owner: caller)
     }
 
     /// The folder at `path` (names separated by "/", matched without case), made on the way with

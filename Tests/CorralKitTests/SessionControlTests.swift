@@ -548,19 +548,21 @@ import Testing
         defer { f.cleanup() }
         let m = f.manager!
         func folders() -> [String] { (ask(f, ["cmd": "folder", "action": "list"])["folders"] as? [[String: Any]] ?? []).map { "\($0["path"]!) \($0["sessions"]!) \($0["expanded"]!)" } }
-        #expect(folders().isEmpty)
+        // The setup's spawn named no folder: it went into one of the boss's own.
+        let own = "\(m.workspace.sessions[boss]!.displayTitle) · agents"
+        #expect(folders() == ["\(own) 1 true"])
         // spawn --folder makes the path and wins over "below the parent".
         let answer = ask(f, ["cmd": "spawn", "agent": "claude", "cwd": f.dir.path, "caller": boss.uuidString, "folder": "Jobs / Disk"])
         let inFolder = try #require(UUID(uuidString: (answer["session"] as? [String: Any])?["id"] as? String ?? ""))
         #expect((answer["session"] as? [String: Any])?["folder"] as? String == "Jobs/Disk")
-        #expect(folders() == ["Jobs 0 true", "Jobs/Disk 1 true"])
+        #expect(folders() == ["\(own) 1 true", "Jobs 0 true", "Jobs/Disk 1 true"])
         // Names match without case; nothing is made twice.
         #expect(m.resolveFolder("jobs/DISK", create: true) == m.workspace.parent(of: inFolder) ?? nil)
-        #expect(m.workspace.folders.count == 2 && m.resolveFolder("Nope", create: false) == nil && m.resolveFolder(" / ", create: true) == nil)
+        #expect(m.workspace.folders.count == 3 && m.resolveFolder("Nope", create: false) == nil && m.resolveFolder(" / ", create: true) == nil)
         // Move by id prefix into a new subfolder, then back to the top.
         let moved = ask(f, ["cmd": "folder", "action": "move", "path": "Jobs/Net", "ids": [String(child.uuidString.prefix(8)), boss.uuidString]])
         #expect((moved["sessions"] as? [[String: Any]])?.map { $0["folder"] as? String } == ["Jobs/Net", "Jobs/Net"])
-        #expect(folders() == ["Jobs 0 true", "Jobs/Disk 1 true", "Jobs/Net 2 true"])
+        #expect(folders() == ["\(own) 0 true", "Jobs 0 true", "Jobs/Disk 1 true", "Jobs/Net 2 true"])
         _ = ask(f, ["cmd": "folder", "action": "move", "path": "/", "ids": [boss.uuidString]])
         #expect((m.workspace.parent(of: boss) ?? nil) == nil)
         #expect(ask(f, ["cmd": "folder", "action": "move", "path": "Jobs", "ids": ["zz"]])["ok"] as? Bool == false)
@@ -572,15 +574,39 @@ import Testing
         #expect(folders().contains("Jobs/Disk 1 true"))
         _ = ask(f, ["cmd": "folder", "action": "create", "path": "Later"])
         _ = ask(f, ["cmd": "folder", "action": "rename", "path": "Jobs", "name": "Work"])
-        #expect(folders() == ["Work 0 true", "Work/Disk 1 true", "Work/Net 1 true", "Later 0 true"])
+        #expect(folders() == ["\(own) 0 true", "Work 0 true", "Work/Disk 1 true", "Work/Net 1 true", "Later 0 true"])
         #expect((ask(f, ["cmd": "folder", "action": "rename", "path": "Work", "name": "a/b"])["error"] as? String)?.contains("slash") == true)
         // Deleting a folder keeps what is in it.
         _ = ask(f, ["cmd": "folder", "action": "delete", "path": "Work/Net"])
-        #expect(folders() == ["Work 1 true", "Work/Disk 1 true", "Later 0 true"] && m.live[child] != nil)
+        #expect(folders() == ["\(own) 0 true", "Work 1 true", "Work/Disk 1 true", "Later 0 true"] && m.live[child] != nil)
         #expect(ask(f, ["cmd": "folder", "action": "delete", "path": "Gone"])["error"] as? String == "No folder Gone.")
         #expect(ask(f, ["cmd": "folder", "action": "create", "path": ""])["error"] as? String == "A folder needs a name.")
         #expect(ask(f, ["cmd": "folder", "action": "paint", "path": "Work"])["error"] as? String == "Unknown folder command paint.")
         #expect(ask(f, ["cmd": "spawn", "agent": "claude", "cwd": f.dir.path, "folder": "/"])["ok"] as? Bool == false)
+    }
+
+    @Test func spawnsWithoutAFolderAreGrouped() throws {
+        let (f, boss, child) = try setup()
+        defer { f.cleanup() }
+        let m = f.manager!
+        // The boss's folder sits right below it and takes its later spawns too.
+        let own = try #require(m.workspace.parent(of: child) ?? nil)
+        #expect(m.workspace.folders[own]?.owner == boss && m.workspace.folders[own]?.auto == true)
+        let top = m.workspace.tree.map(\.id)
+        #expect(top.firstIndex(of: own) == top.firstIndex(of: boss).map { $0 + 1 })
+        let second = ask(f, ["cmd": "spawn", "agent": "claude", "cwd": f.dir.path, "caller": boss.uuidString])
+        let id = try #require(UUID(uuidString: (second["session"] as? [String: Any])?["id"] as? String ?? ""))
+        #expect((m.workspace.parent(of: id) ?? nil) == own)
+        // A child's own spawns nest inside the boss's folder.
+        let grand = ask(f, ["cmd": "spawn", "agent": "claude", "cwd": f.dir.path, "caller": child.uuidString])
+        let g = try #require(UUID(uuidString: (grand["session"] as? [String: Any])?["id"] as? String ?? ""))
+        let childOwn = try #require(m.workspace.parent(of: g) ?? nil)
+        #expect(childOwn != own && (m.workspace.parent(of: childOwn) ?? nil) == own)
+        // Scripts share one folder.
+        let a = ask(f, ["cmd": "spawn", "agent": "claude", "cwd": f.dir.path])
+        let b = ask(f, ["cmd": "spawn", "agent": "claude", "cwd": f.dir.path])
+        let paths = [a, b].map { ($0["session"] as? [String: Any])?["folder"] as? String }
+        #expect(paths == [SessionManager.scriptFolder, SessionManager.scriptFolder])
     }
 
     @Test func aSessionSteersOnlyWhatItStarted() throws {
