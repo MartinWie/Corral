@@ -33,6 +33,12 @@ image metadata) or build output. `scripts/leak-scan.py` checks shipped files; ex
   THIRD_PARTY_NOTICES.txt is stale.
 - A copy of the repo for isolated test runs needs `vendor/ghostty/include` too (GhosttyKit's shim
   includes `ghostty.h` from there), not only `vendor/ghostty-out`.
+- Light/dark: when the user's config picks no colors (`GhosttyRuntime.userSetsColors`), Corral's defaults
+  add `theme = light:…,dark:…` with its own files in the support folder (`GhosttyDefaults.lightColors`;
+  dark stays Ghostty's default). Appearance changes go to the app and every surface
+  (`ghostty_surface_set_color_scheme`), as in Ghostty's app. The chrome reads the resolved config from
+  CONFIG_CHANGE (`effectiveConfig`), so `reloadConfig` clears it before updating, and init reloads once
+  (the scheme's reload request comes before anyone handles actions).
 - Corral loads Ghostty's default config files only when one exists (Ghostty otherwise writes a template
   into Application Support). Fixes that must beat the user's includes go in `GhosttyDefaults.lateConfig`
   (loaded after `config-file` includes), e.g. ssh-env/ssh-terminfo off.
@@ -229,7 +235,8 @@ image metadata) or build output. `scripts/leak-scan.py` checks shipped files; ex
   opened or closed outside the sidebar (`showFolder`) needs the reload `reload` now does when the
   outline's expansion differs from the model (AppKit keeps an item's expansion across `reloadData`, so
   `expand` also collapses). A spawn without `--folder` always lands in a folder (`spawnFolder`: the
-  caller's own via `Folder.owner`, else "Automated"). Tests get no control socket and no skill home unless they set
+  caller's own via `Folder.owner`, else "Automated"); `auto` folders go when their last session closes
+  or moves out (`pruneAutoFolders`). Tests get no control socket and no skill home unless they set
   `controlPath` / `skillHome`.
 - Settings rows: a wrapping caption must get its width from constraints (row/page), never from its
   text, and never set `preferredMaxLayoutWidth` during layout (the window then loops on constraint

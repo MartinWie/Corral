@@ -40,6 +40,10 @@ final class TerminalView: NSView, NSTextInputClient, TerminalSurface {
         registry[surface]?.view
     }
 
+    static func setColorScheme(_ scheme: ghostty_color_scheme_e) {
+        for surface in registry.keys { ghostty_surface_set_color_scheme(surface, scheme) }
+    }
+
     init(runtime: GhosttyRuntime, sessionId: UUID, launch: LaunchSpec) {
         self.runtime = runtime
         self.sessionId = sessionId

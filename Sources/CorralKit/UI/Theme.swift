@@ -442,7 +442,10 @@ enum KeyHint {
         case NSPageUpFunctionKey: return "⇞"
         case NSPageDownFunctionKey: return "⇟"
         case NSDeleteFunctionKey: return "⌦"
-        default: return key.uppercased()
+        default:
+            // "ß" (the German key for /) uppercases to "SS".
+            let upper = key.uppercased()
+            return upper.count == key.count ? upper : key
         }
     }
 

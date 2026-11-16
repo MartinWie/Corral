@@ -85,6 +85,8 @@ enum ShortcutList {
 /// The sheet's content: sections of name / key cap rows in two columns, on the popover's material.
 final class ShortcutsView: NSView {
     static let columnWidth: CGFloat = 250
+    /// Left and right margin.
+    static let inset: CGFloat = 24
     private(set) var rowLabels: [NSTextField] = []
     private(set) var keyCaps: [KeyCap] = []
     /// Opens Settings › Shortcuts (through the responder chain, to the app delegate).
@@ -96,7 +98,6 @@ final class ShortcutsView: NSView {
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 10
-        stack.edgeInsets = NSEdgeInsets(top: 14, left: 16, bottom: 14, right: 16)
         stack.translatesAutoresizingMaskIntoConstraints = false
 
         let title = NSTextField(labelWithString: "Keyboard Shortcuts")
@@ -139,10 +140,12 @@ final class ShortcutsView: NSView {
 
         addSubview(stack)
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: trailingAnchor),
-            stack.topAnchor.constraint(equalTo: topAnchor),
-            stack.bottomAnchor.constraint(equalTo: bottomAnchor),
+            // Margins as constraints: a stack's edgeInsets were left out of the size measured before
+            // the popover shows, so the popover came out without them.
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.inset),
+            trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: Self.inset),
+            stack.topAnchor.constraint(equalTo: topAnchor, constant: 16),
+            bottomAnchor.constraint(equalTo: stack.bottomAnchor, constant: 16),
             note.widthAnchor.constraint(equalTo: columns.widthAnchor),
             header.widthAnchor.constraint(equalTo: columns.widthAnchor),
         ])

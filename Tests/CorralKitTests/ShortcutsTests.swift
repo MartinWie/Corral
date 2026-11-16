@@ -74,12 +74,21 @@ struct ShortcutsTests {
         v.layoutSubtreeIfNeeded()
         #expect(v.rowLabels.map(\.stringValue) == ["Search", "Next", "Clear Screen"])
         #expect(v.keyCaps.map(\.stringValue) == ["⌘K", "⌘I", "⇧⌘K"])
-        // Two columns side by side (plus 16 pt margins and the 24 pt gutter).
-        #expect(v.fittingSize.width == 2 * ShortcutsView.columnWidth + 24 + 32)
+        // Two columns side by side (plus the margins and the 24 pt gutter).
+        #expect(v.fittingSize.width == 2 * ShortcutsView.columnWidth + 24 + 2 * ShortcutsView.inset)
         #expect(ShortcutsView.note.hasSuffix("Hold ⌘ to see the session numbers in the sidebar."))
         let p = ShortcutsView.popover(menu: nil)
         #expect(p.behavior == .transient)
-        #expect(p.contentSize.width == ShortcutsView.columnWidth + 32)
+        #expect(p.contentSize.width == ShortcutsView.columnWidth + 2 * ShortcutsView.inset)
+        // Two columns from a real menu: the popover's size includes the margins before it shows.
+        let menu = NSMenu()
+        for title in ["Go", "Edit"] {
+            let top = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+            top.submenu = NSMenu(title: title)
+            top.submenu?.addItem(NSMenuItem(title: "Do \(title)", action: #selector(NSResponder.cancelOperation(_:)), keyEquivalent: "j"))
+            menu.addItem(top)
+        }
+        #expect(ShortcutsView.popover(menu: menu).contentSize.width == 2 * ShortcutsView.columnWidth + 24 + 2 * ShortcutsView.inset)
     }
 
     @Test func iconAndMenuOpenTheSheetNextToTheCounts() {

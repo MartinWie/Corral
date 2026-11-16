@@ -27,6 +27,10 @@ struct DistributionTests {
         GhosttyDefaults.unbinds = ["super+k"]
         #expect(!GhosttyDefaults.config.contains("shell-integration-features"))
         #expect(GhosttyDefaults.config.hasSuffix("keybind = super+k=unbind\n"))
+        // Without colors of the user's own, terminals follow macOS light/dark.
+        let themeDir = URL(fileURLWithPath: "/tmp/x")
+        #expect(GhosttyDefaults.config(followingSystem: true, dir: themeDir).contains("theme = light:/tmp/x/ghostty-theme-light,dark:/tmp/x/ghostty-theme-dark\n"))
+        #expect(!GhosttyDefaults.config(followingSystem: false).contains("theme ="))
         #expect(GhosttyDefaults.lateConfig?.hasSuffix("shell-integration-features = cursor,no-sudo,title,no-ssh-env,no-ssh-terminfo,path\n") == true)
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("corral-late-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: dir) }

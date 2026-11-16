@@ -109,11 +109,49 @@ public enum GhosttyDefaults {
     /// reports for an empty config. Another value means the fields changed: no override then.
     public static let defaultShellFeatures: UInt32 = 0b100101
 
-    public static var config: String {
-        guard !unbinds.isEmpty else { return base }
-        return base + "# Customized Corral shortcuts (Settings › Shortcuts)\n"
+    public static var config: String { config(followingSystem: followSystemTheme) }
+
+    static func config(followingSystem: Bool, dir: URL = CorralPaths.support) -> String {
+        var text = base
+        if followingSystem {
+            text += "# Your Ghostty config sets no colors: light terminals in light mode\n"
+                + "theme = light:\(dir.appendingPathComponent(lightTheme).path),dark:\(dir.appendingPathComponent(darkTheme).path)\n\n"
+        }
+        guard !unbinds.isEmpty else { return text }
+        return text + "# Customized Corral shortcuts (Settings › Shortcuts)\n"
             + unbinds.map { "keybind = \($0)=unbind\n" }.joined()
     }
+
+    /// Set when the user's Ghostty config picks no colors: terminals (and Corral's chrome, which takes
+    /// its colors from them) then follow macOS light/dark. Dark keeps Ghostty's default colors.
+    public static var followSystemTheme = false
+    static let lightTheme = "ghostty-theme-light", darkTheme = "ghostty-theme-dark"
+    /// GitHub Light's palette (readable on white, dim ANSI white/bright white for TUIs), softer selection.
+    static let lightColors = """
+    background = #ffffff
+    foreground = #1f2328
+    cursor-color = #0969da
+    cursor-text = #ffffff
+    selection-background = #cfe3ff
+    selection-foreground = #1f2328
+    palette = 0=#24292f
+    palette = 1=#cf222e
+    palette = 2=#116329
+    palette = 3=#4d2d00
+    palette = 4=#0969da
+    palette = 5=#8250df
+    palette = 6=#1b7c83
+    palette = 7=#6e7781
+    palette = 8=#57606a
+    palette = 9=#a40e26
+    palette = 10=#1a7f37
+    palette = 11=#633c01
+    palette = 12=#218bff
+    palette = 13=#a475f9
+    palette = 14=#3192aa
+    palette = 15=#8c959f
+
+    """
 
     /// Loaded after everything else, `config-file` includes too: they could turn ssh-env back on.
     public static var lateConfig: String? {
@@ -147,7 +185,11 @@ public enum GhosttyDefaults {
 
     /// Writes `config` into `dir` and returns its path, or nil when it can't be written.
     public static func write(to dir: URL = CorralPaths.support) -> String? {
-        save(config, as: "ghostty-defaults", in: dir)
+        if followSystemTheme {
+            _ = save(lightColors, as: lightTheme, in: dir)
+            _ = save("# Ghostty's default colors\n", as: darkTheme, in: dir)
+        }
+        return save(config(followingSystem: followSystemTheme, dir: dir), as: "ghostty-defaults", in: dir)
     }
 
     /// Writes `lateConfig` (empty when there is none) and returns its path.

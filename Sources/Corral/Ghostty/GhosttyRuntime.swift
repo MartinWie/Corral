@@ -57,6 +57,9 @@ final class GhosttyRuntime: TerminalFactory {
         if let app {
             ghostty_app_set_focus(app, NSApp.isActive)
             updateColorScheme()
+            // The reload that scheme change asks for comes before anyone handles actions: without
+            // this the chrome took the light half of a light/dark theme in dark mode.
+            reloadConfig()
         }
 
         let nc = NotificationCenter.default
@@ -69,10 +72,14 @@ final class GhosttyRuntime: TerminalFactory {
         nc.addObserver(forName: NSTextInputContext.keyboardSelectionDidChangeNotification, object: nil, queue: .main) { [weak self] _ in
             if let app = self?.app { ghostty_app_keyboard_changed(app) }
         }
-        DistributedNotificationCenter.default().addObserver(
-            forName: Notification.Name("AppleInterfaceThemeChangedNotification"), object: nil, queue: .main
-        ) { [weak self] _ in self?.updateColorScheme() }
+        // The app's appearance, not the distributed theme notification: that one can arrive before
+        // NSApp's appearance has changed.
+        appearanceObservation = NSApp.observe(\.effectiveAppearance, options: [.new]) { [weak self] _, _ in
+            DispatchQueue.main.async { self?.updateColorScheme() }
+        }
     }
+
+    private var appearanceObservation: NSKeyValueObservation?
 
     func tick() {
         if let app { ghostty_app_tick(app) }
@@ -81,7 +88,10 @@ final class GhosttyRuntime: TerminalFactory {
     func updateColorScheme() {
         guard let app else { return }
         let dark = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-        ghostty_app_set_color_scheme(app, dark ? GHOSTTY_COLOR_SCHEME_DARK : GHOSTTY_COLOR_SCHEME_LIGHT)
+        let scheme = dark ? GHOSTTY_COLOR_SCHEME_DARK : GHOSTTY_COLOR_SCHEME_LIGHT
+        ghostty_app_set_color_scheme(app, scheme)
+        // Each surface keeps its own light/dark state (new ones copy the app's), as in Ghostty's app.
+        TerminalView.setColorScheme(scheme)
     }
 
     // MARK: Config
@@ -93,6 +103,39 @@ final class GhosttyRuntime: TerminalFactory {
         guard shellFeatures(loadingUserFiles: false) == GhosttyDefaults.defaultShellFeatures else { return nil }
         return shellFeatures(loadingUserFiles: true)
     }
+
+    /// Whether the user's own config (Ghostty's files, Corral's overrides, includes) picks terminal
+    /// colors: a `theme` or `background` line, or a background other than Ghostty's default.
+    static func userSetsColors() -> Bool {
+        if userSets(["theme", "background"]) { return true }
+        guard let cfg = ghostty_config_new() else { return true }
+        defer { ghostty_config_free(cfg) }
+        if !GhosttyDefaults.userConfigFiles().isEmpty { ghostty_config_load_default_files(cfg) }
+        if FileManager.default.fileExists(atPath: GhosttyDefaults.overridesURL.path) {
+            ghostty_config_load_file(cfg, GhosttyDefaults.overridesURL.path)
+        }
+        ghostty_config_load_recursive_files(cfg)
+        ghostty_config_finalize(cfg)
+        var c = ghostty_config_color_s()
+        let key = "background"
+        guard ghostty_config_get(cfg, &c, key, UInt(key.utf8.count)) else { return true }
+        return (c.r, c.g, c.b) != (0x28, 0x2C, 0x34)
+    }
+
+    /// A line setting one of `keys` in the user's config files or Corral's overrides (not includes).
+    static func userSets(_ keys: Set<String>) -> Bool {
+        let files = GhosttyDefaults.userConfigFiles() + [GhosttyDefaults.overridesURL.path]
+        return files.contains { path in
+            (try? String(contentsOfFile: path, encoding: .utf8))?.split(separator: "\n").contains { line in
+                line.split(separator: "=", maxSplits: 1).first.map { keys.contains($0.trimmingCharacters(in: .whitespaces)) } ?? false
+            } ?? false
+        }
+    }
+
+    /// Corral's own light/dark theme and no `window-theme` of the user's: Ghostty turns "auto" into
+    /// "system" for any light/dark theme, which would give the chrome system grays instead of colors
+    /// from the terminal.
+    private static var keepAutoWindowTheme = false
 
     private static func shellFeatures(loadingUserFiles: Bool) -> UInt32? {
         guard let cfg = ghostty_config_new() else { return nil }
@@ -120,6 +163,8 @@ final class GhosttyRuntime: TerminalFactory {
     /// then includes, then Corral's late fixes (ssh).
     static func loadConfig() -> ghostty_config_t? {
         GhosttyDefaults.userShellFeatures = userShellFeatures()
+        GhosttyDefaults.followSystemTheme = !userSetsColors()
+        keepAutoWindowTheme = GhosttyDefaults.followSystemTheme && !userSets(["window-theme"])
         guard let cfg = ghostty_config_new() else { return nil }
         loadLayers(cfg)
         if GhosttyDefaults.lateConfig != nil, let late = GhosttyDefaults.writeLate() { ghostty_config_load_file(cfg, late) }
@@ -134,11 +179,12 @@ final class GhosttyRuntime: TerminalFactory {
 
     func reloadConfig() {
         guard let app, let newConfig = Self.loadConfig() else { return }
+        // Cleared first: the update below sends CONFIG_CHANGE with the resolved (light/dark) config.
+        if let e = effectiveConfig { ghostty_config_free(e) }
+        effectiveConfig = nil
         ghostty_app_update_config(app, newConfig)
         if let old = config { ghostty_config_free(old) }
         config = newConfig
-        if let e = effectiveConfig { ghostty_config_free(e) }
-        effectiveConfig = nil
         NotificationCenter.default.post(name: .ghosttyConfigReloaded, object: self)
     }
 
@@ -150,7 +196,8 @@ final class GhosttyRuntime: TerminalFactory {
         var value: UnsafePointer<CChar>?
         let key = "window-theme"
         guard ghostty_config_get(cfg, &value, key, UInt(key.utf8.count)), let value else { return nil }
-        return String(cString: value)
+        let theme = String(cString: value)
+        return theme == "system" && Self.keepAutoWindowTheme ? "auto" : theme
     }
 
     private func color(_ key: String) -> NSColor? {

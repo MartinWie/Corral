@@ -110,6 +110,7 @@ struct ShortcutCustomizeTests {
             #expect(KeyHint.keyName(k) == shown, "\(shown)")
         }
         #expect(KeyHint.keyName("\u{7f}") == "⌫")
+        #expect(KeyHint.keyName("ß") == "ß" && KeyHint.keyName("ä") == "Ä")
         #expect(KeyHint.modifierGlyphs([.command, .shift, .control, .option]) == ["⌃", "⌥", "⇧", "⌘"])
     }
 

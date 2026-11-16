@@ -562,7 +562,8 @@ import Testing
         // Move by id prefix into a new subfolder, then back to the top.
         let moved = ask(f, ["cmd": "folder", "action": "move", "path": "Jobs/Net", "ids": [String(child.uuidString.prefix(8)), boss.uuidString]])
         #expect((moved["sessions"] as? [[String: Any]])?.map { $0["folder"] as? String } == ["Jobs/Net", "Jobs/Net"])
-        #expect(folders() == ["\(own) 0 true", "Jobs 0 true", "Jobs/Disk 1 true", "Jobs/Net 2 true"])
+        // Moving out its last session removed the boss's folder.
+        #expect(folders() == ["Jobs 0 true", "Jobs/Disk 1 true", "Jobs/Net 2 true"])
         _ = ask(f, ["cmd": "folder", "action": "move", "path": "/", "ids": [boss.uuidString]])
         #expect((m.workspace.parent(of: boss) ?? nil) == nil)
         #expect(ask(f, ["cmd": "folder", "action": "move", "path": "Jobs", "ids": ["zz"]])["ok"] as? Bool == false)
@@ -574,11 +575,11 @@ import Testing
         #expect(folders().contains("Jobs/Disk 1 true"))
         _ = ask(f, ["cmd": "folder", "action": "create", "path": "Later"])
         _ = ask(f, ["cmd": "folder", "action": "rename", "path": "Jobs", "name": "Work"])
-        #expect(folders() == ["\(own) 0 true", "Work 0 true", "Work/Disk 1 true", "Work/Net 1 true", "Later 0 true"])
+        #expect(folders() == ["Work 0 true", "Work/Disk 1 true", "Work/Net 1 true", "Later 0 true"])
         #expect((ask(f, ["cmd": "folder", "action": "rename", "path": "Work", "name": "a/b"])["error"] as? String)?.contains("slash") == true)
         // Deleting a folder keeps what is in it.
         _ = ask(f, ["cmd": "folder", "action": "delete", "path": "Work/Net"])
-        #expect(folders() == ["\(own) 0 true", "Work 1 true", "Work/Disk 1 true", "Later 0 true"] && m.live[child] != nil)
+        #expect(folders() == ["Work 1 true", "Work/Disk 1 true", "Later 0 true"] && m.live[child] != nil)
         #expect(ask(f, ["cmd": "folder", "action": "delete", "path": "Gone"])["error"] as? String == "No folder Gone.")
         #expect(ask(f, ["cmd": "folder", "action": "create", "path": ""])["error"] as? String == "A folder needs a name.")
         #expect(ask(f, ["cmd": "folder", "action": "paint", "path": "Work"])["error"] as? String == "Unknown folder command paint.")
@@ -607,6 +608,13 @@ import Testing
         let b = ask(f, ["cmd": "spawn", "agent": "claude", "cwd": f.dir.path])
         let paths = [a, b].map { ($0["session"] as? [String: Any])?["folder"] as? String }
         #expect(paths == [SessionManager.scriptFolder, SessionManager.scriptFolder])
+        // Folders the command made go once their last session closes; the user's own stay.
+        let mine = m.newFolder(name: "Mine")
+        _ = m.move(id, to: mine, at: nil)
+        m.close(g)
+        #expect(m.workspace.folders[childOwn] == nil && m.workspace.folders[own] != nil)
+        m.close(child)
+        #expect(m.workspace.folders[own] == nil && m.workspace.folders[mine] != nil)
     }
 
     @Test func aSessionSteersOnlyWhatItStarted() throws {

@@ -299,18 +299,13 @@ extension SessionManager {
         DispatchQueue.main.asyncAfter(deadline: .now() + Double(minutes) * Self.tidyUnit, execute: work)
     }
 
-    /// Closes the session (it stays in Closed, with its conversation) and removes folders the command
-    /// made that are empty now. Not the one the user is looking at: that one gets another round.
+    /// Closes the session (it stays in Closed, with its conversation; `close` removes folders the
+    /// command made that are empty now). Not the one the user is looking at: that one gets another round.
     private func tidy(_ id: UUID) {
         control.tidy[id] = nil
         guard live[id] != nil, ["done", "exited"].contains(controlState(id)) else { return }
         guard workspace.selected != id else { return scheduleTidy(id) }
-        var folder = workspace.parent(of: id) ?? nil
         close(id)
-        while let f = folder, workspace.folders[f]?.auto == true, workspace.children(of: f).isEmpty {
-            folder = workspace.parent(of: f) ?? nil
-            deleteFolder(f)
-        }
     }
 
     /// Before `close` takes the session apart.

@@ -880,11 +880,13 @@ final class SessionManager: TerminalActionHandler {
         let wasSelected = workspace.selected == id
         // Only sessions that ran an agent go to Closed; a plain terminal is simply gone, and so is a
         // session whose conversation doesn't exist (a resume that found nothing).
+        let folder = workspace.parent(of: id) ?? nil
         if let r = workspace.sessions[id], r.agent == .shell || missingTranscript(r) {
             workspace.forget(id)
         } else {
             workspace.close(id)
         }
+        pruneAutoFolders(from: folder)
         emit(.structure)
         if wasSelected, let partner = partners.first(where: { live[$0] != nil }) {
             // Stay on the card.
@@ -1014,6 +1016,16 @@ final class SessionManager: TerminalActionHandler {
         emit(.structure)
     }
 
+    /// Removes `folder` and then its parents while they are empty folders the corral command made
+    /// (`Folder.auto`): agents' groups go once their last session closed or moved out.
+    func pruneAutoFolders(from folder: UUID?) {
+        var folder = folder
+        while let f = folder, workspace.folders[f]?.auto == true, workspace.contains(f), workspace.children(of: f).isEmpty {
+            folder = workspace.parent(of: f) ?? nil
+            deleteFolder(f)
+        }
+    }
+
     func deleteFolder(_ id: UUID) {
         workspace.deleteFolder(id)
         emit(.structure)
@@ -1022,7 +1034,9 @@ final class SessionManager: TerminalActionHandler {
 
     @discardableResult
     func move(_ id: UUID, to folder: UUID?, at index: Int?) -> Bool {
+        let from = workspace.parent(of: id) ?? nil
         guard workspace.move(id, to: folder, at: index) else { return false }
+        if from != folder { pruneAutoFolders(from: from) }
         emit(.structure)
         scheduleSave()
         return true
