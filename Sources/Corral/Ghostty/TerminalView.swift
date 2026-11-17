@@ -60,6 +60,8 @@ final class TerminalView: NSView, NSTextInputClient, TerminalSurface {
         registerForDraggedTypes([.fileURL, .string])
         NotificationCenter.default.addObserver(self, selector: #selector(windowDidChangeScreen(_:)),
                                                name: NSWindow.didChangeScreenNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(appDidBecomeActive(_:)),
+                                               name: NSApplication.didBecomeActiveNotification, object: nil)
     }
 
     deinit {
@@ -180,12 +182,15 @@ final class TerminalView: NSView, NSTextInputClient, TerminalSurface {
     private var shown = false
 
     /// Becoming visible makes the render thread draw, but that frame can be lost: it waits for a vsync
-    /// tick, or is dropped for not matching the layer's size once layout has moved on. Nothing else
-    /// draws while the program prints nothing (an idle agent, a background command), and the hidden
-    /// surface gave up its old frame: a blank pane. So draw synchronously (presented on the spot) once
-    /// layout settled, and again once the render thread caught up with output from while hidden.
+    /// tick, or is dropped for not matching the layer's size once layout has moved on, and after a
+    /// wake or unlock the window server may not show the window yet. Nothing else draws while the
+    /// program prints nothing (an idle agent, a background command), and the hidden surface gave up
+    /// its old frame: a blank pane. So draw synchronously (presented on the spot) once layout settled,
+    /// again once the render thread caught up with output from while hidden, and twice more for a
+    /// screen that is still coming back; each also asks Core Animation to draw the layer (Ghostty's
+    /// IOSurfaceLayer draws in `display`).
     private func scheduleShowDraws() {
-        for delay in [0.0, 0.25] {
+        for delay in [0.0, 0.25, 1, 3] {
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
                 MainActor.assumeIsolated { self?.drawIfShown() }
             }
@@ -196,6 +201,12 @@ final class TerminalView: NSView, NSTextInputClient, TerminalSurface {
         guard shown, let surface, window != nil, !isHiddenOrHasHiddenAncestor,
               bounds.width > 0, bounds.height > 0 else { return }
         ghostty_surface_draw(surface)
+        layer?.setNeedsDisplay()
+    }
+
+    /// Coming back to Corral (after a lock, sleep or another app): the shown terminal draws again.
+    @objc private func appDidBecomeActive(_ notification: Notification) {
+        if shown { scheduleShowDraws() }
     }
 
     /// Types text as if pasted (used for drag and drop of paths).

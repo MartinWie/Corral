@@ -147,7 +147,9 @@ image metadata) or build output. `scripts/leak-scan.py` checks shipped files; ex
   a surface emptied while the screen slept stayed blank until its program printed something. That
   frame can still be lost (it waits for a vsync tick, or `IOSurfaceLayer` drops a frame whose size no
   longer matches the layer), so `TerminalView.setVisible(true)` also draws synchronously
-  (`ghostty_surface_draw`, presented on the spot) after layout and again 0.25 s later. Keep vsync on:
+  (`ghostty_surface_draw`, presented on the spot, plus `setNeedsDisplay` on Ghostty's IOSurfaceLayer) after
+  layout and again 0.25, 1 and 3 s later (a waking or unlocking screen can drop the early ones), and
+  whenever Corral becomes the active app. Keep vsync on:
   Ghostty documents kernel panics without it on macOS 14.4+.
 - Display id: libghostty's display link (vsync) is bound to a display, and a hidden surface
   (`setVisible(false)`) releases its frame and draws again only through that link. `TerminalView`
