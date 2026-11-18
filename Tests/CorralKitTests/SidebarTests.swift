@@ -277,6 +277,11 @@ struct SidebarTests {
         #expect(s.outline.dropMark == .line(y: rect.minY, x: SidebarOutlineView.cellX(level: 0)))
         s.outline.draggingExited(drag)
         #expect(s.outline.dropMark == .none)
+        // Ending a drag clears the mark without calling AppKit (which has no draggingEnded to call).
+        _ = at(0.5)
+        _ = s.outlineView(s.outline, validateDrop: drag, proposedItem: s.node(.folder(b)), proposedChildIndex: -1)
+        s.outline.draggingEnded(drag)
+        #expect(s.outline.dropMark == .none)
 
         // Accepting the retargeted drop puts A after B at the root, not inside it.
         #expect(s.outlineView(s.outline, acceptDrop: drag, item: nil, childIndex: bIndex + 1))

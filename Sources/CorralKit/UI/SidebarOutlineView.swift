@@ -192,8 +192,9 @@ final class SidebarOutlineView: NSOutlineView {
         showDrop(.none)
     }
 
+    /// No super: NSOutlineView doesn't implement this optional method, and the exception it threw aborted
+    /// the system's drag teardown (the Dock stayed in drag mode, swipes and Mission Control stopped).
     override func draggingEnded(_ sender: NSDraggingInfo) {
-        super.draggingEnded(sender)
         showDrop(.none)
     }
 
