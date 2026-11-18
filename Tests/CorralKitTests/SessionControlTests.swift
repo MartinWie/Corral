@@ -376,6 +376,7 @@ import Testing
                     io.cwd = f.dir.path
                     io.request = { ControlClient.request($0, path: path, timeout: $1) }
                     io.launchApp = { false }
+                    io.appRunning = { false }
                     let status = CorralCLI.run(args, io: io)
                     done.resume(returning: (status, out))
                 }

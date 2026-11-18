@@ -172,6 +172,17 @@ enum UnixSocket {
         return addr
     }
 
+    /// Something listens at `path`.
+    static func answers(_ path: String) -> Bool {
+        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        guard fd >= 0 else { return false }
+        defer { close(fd) }
+        guard var addr = address(path) else { return false }
+        return withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) }
+        } == 0
+    }
+
     /// All of `data`, false when the other side stops taking it.
     @discardableResult
     static func write(_ data: Data, to fd: Int32) -> Bool {

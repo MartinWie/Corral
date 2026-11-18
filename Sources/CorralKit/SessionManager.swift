@@ -1222,6 +1222,10 @@ final class SessionManager: TerminalActionHandler {
     func handleKey(_ event: NSEvent, session id: UUID) {
         // Typing into a launching session (Ctrl-C included) shows the terminal; ⌘ shortcuts don't.
         if !event.modifierFlags.contains(.command) { launchReady(id) }
+        let mods = event.modifierFlags.intersection([.command, .control, .option, .shift])
+        if (mods.isEmpty && Int(event.keyCode) == kVK_Escape) || (mods == .control && Int(event.keyCode) == kVK_ANSI_C) {
+            scheduleInterruptChecks(id)
+        }
         // Shortcuts (Cmd+2 to look at another session, Cmd+N…) are not answers to a prompt.
         guard event.modifierFlags.isDisjoint(with: [.command, .control, .option]) else { return }
         let code = Int(event.keyCode)
@@ -1235,6 +1239,32 @@ final class SessionManager: TerminalActionHandler {
                   let d = c.first, d.isNumber || d == "y" || d == "n" {
             apply(.userSubmitted, to: id)
         }
+    }
+
+    // MARK: Interrupts
+
+    /// When to look for Claude's interrupt notice after Esc / Ctrl-C (it redraws within a moment).
+    static var interruptChecks: [TimeInterval] = [0.3, 1, 2]
+
+    /// Claude's notice for a stopped turn, near the bottom of the screen (older ones scroll up).
+    static func showsInterrupt(_ screen: String) -> Bool {
+        let lines = screen.split(separator: "\n").suffix(15)
+        return lines.contains { $0.contains("Interrupted") && $0.contains("What should Claude do") }
+    }
+
+    private func scheduleInterruptChecks(_ id: UUID) {
+        guard let ls = live[id], ls.status.agent == .claude, ls.status.hooksSeen, ls.status.activity == .working else { return }
+        for delay in Self.interruptChecks {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in self?.checkInterrupt(id) }
+        }
+    }
+
+    /// Claude ends an interrupted turn without a Stop hook: the screen is the only sign.
+    func checkInterrupt(_ id: UUID) {
+        guard !terminating, let ls = live[id], ls.status.agent == .claude, ls.status.activity == .working,
+              Self.showsInterrupt(ls.terminal.viewportText()) else { return }
+        backgroundHolds[id] = nil
+        apply(.interrupted, to: id)
     }
 
     // MARK: Background commands
@@ -1339,9 +1369,14 @@ final class SessionManager: TerminalActionHandler {
         }
         if renamed { scheduleSave() }
         for (id, ls) in live {
-            guard let job = workspace.sessions[id]?.bgJobId, !ls.status.hooksSeen,
-                  let agent = agents.first(where: { $0.id == job }) else { continue }
-            apply(.backgroundJob(agent.activity, detail: agent.needs), to: id)
+            guard let job = workspace.sessions[id]?.bgJobId, let agent = agents.first(where: { $0.id == job }) else { continue }
+            // A background job's scripts run in Claude's daemon, not under this terminal, so
+            // `holdForBackground` can't see them: after a turn's end its job file says they still run.
+            if ls.status.hooksSeen, agent.inFlight > 0, ls.status.activity == .done || ls.status.activity == .idle {
+                apply(.backgroundCommands, to: id)
+            } else {
+                apply(.backgroundJob(agent.activity, detail: agent.needs), to: id)
+            }
         }
         updateBadge()
         emit(.background)

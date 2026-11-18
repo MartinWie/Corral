@@ -80,6 +80,7 @@ import Testing
         var err: [String] = []
         var requests: [[String: Any]] = []
         var launches = 0
+        var running = false
         var slept: TimeInterval = 0
         var answers: [Result<[String: Any], ControlClient.Failure>] = []
         var skill: Result<String, AgentSkill.InstallError> = .success("/skills/corral/SKILL.md")
@@ -95,6 +96,7 @@ import Testing
                 return self.answers.isEmpty ? .failure(.notRunning) : self.answers.removeFirst()
             }
             io.launchApp = { self.launches += 1; return true }
+            io.appRunning = { self.running }
             io.sleep = { self.slept += $0 }
             io.installSkill = { _ in try self.skill.get() }
             return io
@@ -146,6 +148,12 @@ import Testing
         io.launchApp = { false }
         #expect(CorralCLI.run(["list"], io: io) == 1)
         #expect(dead.err.last == "corral: Corral isn't running and couldn't be started")
+        // Corral runs with control off: said at once, nothing started or waited for.
+        let off = Recorder()
+        off.running = true
+        #expect(CorralCLI.run(["list"], io: off.io) == 1)
+        #expect(off.err == [CorralCLI.controlOff] && off.launches == 0 && off.slept == 0)
+        #expect(CorralCLI.run(["events"], io: off.io) == 1 && off.err.last == CorralCLI.controlOff)
     }
 
     @Test func spawnWaitWaitsForTheNewSession() {

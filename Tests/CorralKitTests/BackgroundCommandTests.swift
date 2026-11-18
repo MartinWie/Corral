@@ -115,4 +115,58 @@ struct BackgroundCommandTests {
         #expect(ProcessInspector.claudeBackgroundShells(agent: me) == [snapshot.processIdentifier])
         #expect(ProcessInspector.claudeBackgroundShells(agent: 0).isEmpty)
     }
+
+    @Test func aBackgroundJobsScriptsKeepItWorkingAfterItsTurn() throws {
+        let f = fixture(Fake())
+        defer { f.cleanup() }
+        var job = BackgroundAgent(id: "job1", sessionId: "s-job1", name: "Job", cwd: f.dir.path, state: "working")
+        f.manager.attach(job)
+        let id = try #require(f.selected)
+        hook(f, id, "UserPromptSubmit")
+        hook(f, id, "Stop")
+        #expect(f.manager.live[id]?.status.activity == .done)
+        // The job file says its script still runs (it lives in Claude's daemon, not this terminal).
+        job.tempo = "idle"
+        job.inFlight = 1
+        f.manager.applyBackground([job])
+        #expect(f.manager.live[id]?.status.activity == .working && f.manager.live[id]?.status.detail == StatusReducer.backgroundDetail)
+        // The script ends without another turn: done.
+        job.inFlight = 0
+        job.state = "done"
+        f.manager.applyBackground([job])
+        #expect(f.manager.live[id]?.status.activity == .done)
+        // Hooks keep the say over a job between turns otherwise.
+        hook(f, id, "UserPromptSubmit")
+        f.manager.applyBackground([job])
+        #expect(f.manager.live[id]?.status.activity == .working && f.manager.live[id]?.status.detail == nil)
+    }
+
+    @Test func anInterruptedTurnGoesIdle() async throws {
+        let fake = Fake()
+        let f = fixture(fake)
+        defer { f.cleanup() }
+        SessionManager.interruptChecks = [0]
+        defer { SessionManager.interruptChecks = [0.3, 1, 2] }
+        f.manager.newSession(agent: .claude, cwd: f.dir.path)
+        let id = try #require(f.selected)
+        hook(f, id, "UserPromptSubmit")
+        let esc = try #require(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: 0,
+                                                 context: nil, characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}",
+                                                 isARepeat: false, keyCode: 53))
+        // Esc that didn't stop the turn (no notice on screen): still working.
+        f.terminal(id)?.text = "✻ Working…\n> "
+        f.manager.handleKey(esc, session: id)
+        try await Task.sleep(nanoseconds: 50_000_000)
+        #expect(f.manager.live[id]?.status.activity == .working)
+        // Claude's notice: idle, nothing announced.
+        f.terminal(id)?.text = "  ⎿  Interrupted · What should Claude do instead?\n\n> "
+        f.manager.handleKey(esc, session: id)
+        try await Task.sleep(nanoseconds: 50_000_000)
+        #expect(f.manager.live[id]?.status.activity == .idle && f.manager.live[id]?.status.unread == false)
+        // An old notice far up the screen doesn't count.
+        hook(f, id, "UserPromptSubmit")
+        f.terminal(id)?.text = "  ⎿  Interrupted · What should Claude do instead?" + String(repeating: "\nline", count: 20)
+        f.manager.checkInterrupt(id)
+        #expect(f.manager.live[id]?.status.activity == .working)
+    }
 }

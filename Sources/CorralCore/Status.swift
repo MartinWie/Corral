@@ -57,6 +57,8 @@ public enum Signal: Equatable, Sendable {
     case backgroundJob(Activity, detail: String?)
     /// The turn ended with commands still running in the background: Claude goes on once they end.
     case backgroundCommands
+    /// The user stopped the agent's turn (Esc, Ctrl-C), which Claude reports with no hook.
+    case interrupted
 
     public enum ProgressState: Equatable, Sendable { case active, removed, error }
 }
@@ -112,6 +114,9 @@ public enum StatusReducer {
     public static let shellCommandThreshold: Double = 10
 
     /// Applies a signal. `focused` = session is visible in a key window right now.
+    /// `detail` of a session whose turn ended while its scripts still run.
+    public static let backgroundDetail = "Background command"
+
     public static func reduce(_ s: inout LiveStatus, _ signal: Signal, focused: Bool, now: Date = Date()) {
         let before = s.activity
         switch signal {
@@ -218,10 +223,17 @@ public enum StatusReducer {
             s.unread = false
         case .backgroundCommands:
             s.activity = .working
-            s.detail = "Background command"
+            s.detail = backgroundDetail
             s.unread = false
+        case .interrupted:
+            // The user is at the prompt: nothing to announce.
+            guard s.activity == .working else { break }
+            s.activity = .idle
+            s.detail = nil
+            s.compactFrom = nil
         case .backgroundJob(let activity, let detail):
-            guard !s.hooksSeen, s.activity != activity else { break }
+            // Hooks report turns; once one ended, only the job knows when its scripts are done.
+            guard !s.hooksSeen || s.detail == backgroundDetail, s.activity != activity else { break }
             s.activity = activity
             s.detail = activity == .needsInput ? detail : nil
             s.need = .input

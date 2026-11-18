@@ -94,6 +94,13 @@ image metadata) or build output. `scripts/leak-scan.py` checks shipped files; ex
   ("Background command"), nothing is announced, the exits are watched with kqueue (`ProcessExitWatch`, no
   polling). Any other hook ends the hold; when the commands are gone and Claude stays quiet for
   `backgroundGrace` the held end applies.
+  A session attached to a Claude background job (`bgJobId`) runs its scripts in Claude's daemon, out
+  of the terminal's process tree: after a turn's end its job file's `inFlight` gives "Background
+  command" (`applyBackground`), and the job's later state ends it.
+- Interrupts: Claude ends a turn stopped with Esc / Ctrl-C without a Stop hook. Those keys in a
+  working Claude session look at the screen's bottom lines for its "Interrupted · What should Claude
+  do instead?" notice at `interruptChecks` (0.3, 1, 2 s, `checkInterrupt`), then `.interrupted` →
+  idle. Bounded and key-triggered like the trust check: never widen it into a poll.
 - Removing hooks (Settings › Agents › Remove): `Integrations.uninstall*` take out only Corral's hook
   commands (settings.json backed up, unknown shapes refused) and only plugin files whose first line is
   Corral's. `AppSettings.hooksRemoved` keeps the sidebar banner from offering them again; installing

@@ -296,6 +296,8 @@ public enum CorralCLI {
             ControlClient.stream($0, each: $1)
         }
         public var launchApp: () -> Bool = CorralCLI.launchApp
+        /// Corral runs (its hook socket answers) even though the control socket doesn't: control is off.
+        public var appRunning: () -> Bool = { UnixSocket.answers(CorralPaths.socket.path) }
         public var sleep: (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) }
         public var installSkill: (String?) throws -> String = { try AgentSkill.install(named: $0).path }
 
@@ -304,6 +306,7 @@ public enum CorralCLI {
 
     /// How long a freshly started app gets to open its socket.
     static let launchWait: TimeInterval = 15
+    static let controlOff = "corral: command line control is off. Turn it on in Corral › Settings › Agents."
 
     public static func run(_ args: [String], io: IO = IO()) -> Int32 {
         let call: Invocation
@@ -383,6 +386,10 @@ public enum CorralCLI {
             }
         }
         var failure = run()
+        if failure == .notRunning, io.appRunning() {
+            io.err(controlOff)
+            return 1
+        }
         if failure == .notRunning {
             guard io.launchApp() else {
                 io.err("corral: Corral isn't running and couldn't be started")
@@ -405,6 +412,10 @@ public enum CorralCLI {
     /// Asks the app, starting it first when it isn't running.
     private static func ask(_ request: [String: Any], timeout: TimeInterval?, io: IO) -> [String: Any]? {
         var result = io.request(request, timeout)
+        if result == .failure(.notRunning), io.appRunning() {
+            io.err(controlOff)
+            return nil
+        }
         if result == .failure(.notRunning) {
             guard io.launchApp() else {
                 io.err("corral: Corral isn't running and couldn't be started")
