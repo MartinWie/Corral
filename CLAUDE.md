@@ -156,8 +156,16 @@ image metadata) or build output. `scripts/leak-scan.py` checks shipped files; ex
   longer matches the layer), so `TerminalView.setVisible(true)` also draws synchronously
   (`ghostty_surface_draw`, presented on the spot, plus `setNeedsDisplay` on Ghostty's IOSurfaceLayer) after
   layout and again 0.25, 1 and 3 s later (a waking or unlocking screen can drop the early ones), and
-  whenever Corral becomes the active app. Keep vsync on:
-  Ghostty documents kernel panics without it on macOS 14.4+.
+  whenever Corral becomes the active app. 3.5 s after a show or activation `healIfBlank` checks what the layer holds
+  (`renderProblems`: no frame, wrong size, faded or hidden layer, a single-color frame while the
+  screen has text) and once restarts the surface (occlusion off/on, draws). The repair always runs; with
+  Settings › General › Diagnostics (`AppSettings.diagnostics`, off by default) it logs "Corral render" (and the sidebar
+  "Corral sidebar") to Console, and `corral debug [ID]` prints the same report (`renderReport`). Every show,
+  hide and activation bumps `showGen`; pending draws and checks of an older one bail (no stacking on fast
+  switching). A terminal the container hid drops its layer's last frame (a full-size IOSurface, ~17 MB on a
+  Retina window) after `frameDropDelay` (5 s), and one shown with no frame draws inside `setVisible(true)`,
+  before the pass commits. A covered window keeps the shown terminal's frame, so coming back is instant.
+  Keep vsync on: Ghostty documents kernel panics without it on macOS 14.4+.
 - Display id: libghostty's display link (vsync) is bound to a display, and a hidden surface
   (`setVisible(false)`) releases its frame and draws again only through that link. `TerminalView`
   re-sends the id on window screen changes (as Ghostty's SurfaceView) and whenever it becomes

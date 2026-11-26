@@ -133,6 +133,7 @@ public enum BackgroundAgents {
         let stateFile = jobsDir.appendingPathComponent(agent.id).appendingPathComponent("state.json")
         guard let d = try? Data(contentsOf: stateFile),
               let job = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { return agent }
+        if let name = job["name"] as? String, !name.isEmpty { agent.name = name }
         agent.needs = job["needs"] as? String
         agent.detail = job["detail"] as? String
         if let s = job["state"] as? String { agent.state = s }

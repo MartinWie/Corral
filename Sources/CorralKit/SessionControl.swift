@@ -82,6 +82,7 @@ extension SessionManager {
     static let screenLines = 40
     static let finalStates: Set<String> = ["done", "error", "exited"]
     static let measureOff = "Session measurement is off. Turn it on in Corral › Settings › Agents."
+    static let diagnosticsOff = "Diagnostics are off. Turn them on in Corral › Settings › General."
     static let maxReport = 4_000
     /// The prompt rides on the agent's command line, quoted three shells deep.
     static let maxPrompt = 32_000
@@ -469,6 +470,12 @@ extension SessionManager {
             guard typeText(text, into: target, submit: !raw) else { return fail("The terminal didn't take the text.") }
             // No state with it: the session only moves on once it has read what was typed.
             reply(["ok": true, "note": raw ? "Typed." : "Sent."])
+        case "debug":
+            guard workspace.settings.diagnostics else { return fail(Self.diagnosticsOff) }
+            guard let id = target ?? workspace.selected, let ls = live[id] else { return fail("Which session?") }
+            var answer: [String: Any] = ["ok": true, "render": ls.terminal.renderReport()]
+            if let session = controlSession(id) { answer["session"] = session }
+            reply(answer)
         case "output":
             guard let target, let ls = live[target] else { return fail("Which session?") }
             let lines = request["lines"] as? Int ?? Self.screenLines

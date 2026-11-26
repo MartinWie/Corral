@@ -60,6 +60,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     let autoUpdateSwitch = NSSwitch()
     let checkNowButton = NSButton(title: "Check Now", target: nil, action: nil)
     private(set) var updatesRow: SettingsRow?
+    let diagnosticsSwitch = NSSwitch()
     /// Info.plist the version row reads (tests inject one).
     var appInfo: () -> [String: Any] = { Bundle.main.infoDictionary ?? [:] }
 
@@ -204,6 +205,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             case .integrations: self.refreshIntegrations()
             case .settings:
                 self.refreshKeepAwake()
+                self.refreshDiagnostics()
                 self.notifications.refresh()
             case .status, .background:
                 if self.window?.isVisible == true { self.refreshKeepAwake() }
@@ -316,6 +318,13 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             let version = SettingsRow(title: "Corral " + UpdateText.version(appInfo()), accessory: checkNowButton)
             page.addSection("Updates", SettingsList([auto, version]))
         }
+
+        diagnosticsSwitch.target = self
+        diagnosticsSwitch.action = #selector(diagnosticsChanged(_:))
+        diagnosticsSwitch.controlSize = .small
+        diagnosticsSwitch.setAccessibilityLabel("Diagnostics")
+        let diagnostics = SettingsRow(title: "Diagnostics", caption: Self.diagnosticsCaption, accessory: diagnosticsSwitch)
+        page.addSection("Troubleshooting", SettingsList([diagnostics]))
         return page
     }
 
@@ -677,6 +686,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         }
         refreshIntegrations()
         refreshKeepAwake()
+        refreshDiagnostics()
         refreshUpdates()
     }
 
@@ -739,6 +749,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     static let keepAwakeCaption = "Only while a session or background job is working, never while it waits for you. "
         + "Closing the lid still sleeps the Mac."
     static let keepDisplayCaption = "No display sleep, screen saver or lock while an agent works."
+    static let diagnosticsCaption = "Logs repairs of blank terminals and the sidebar to Console (search for Corral), "
+        + "and turns on corral debug, which reports how a terminal is drawn."
 
     /// The switch, and while it holds the Mac awake, how many agents are working.
     func refreshKeepAwake() {
@@ -755,6 +767,11 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             caption = "Awake now: \(n) agent\(n == 1 ? " is" : "s are") working. " + caption
         }
         keepAwakeRow?.caption = caption
+    }
+
+    func refreshDiagnostics() {
+        let on: NSControl.StateValue = manager.workspace.settings.diagnostics ? .on : .off
+        if diagnosticsSwitch.state != on { diagnosticsSwitch.state = on }
     }
 
     /// Config paths can appear or go away while the window is closed: read when the page shows.
@@ -823,6 +840,10 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 
     @objc func keepDisplayChanged(_ sender: NSSwitch) {
         manager.setKeepDisplayOn(sender.state == .on)
+    }
+
+    @objc func diagnosticsChanged(_ sender: NSSwitch) {
+        manager.setDiagnostics(sender.state == .on)
     }
 
     @objc func autoUpdateChanged(_ sender: NSSwitch) {

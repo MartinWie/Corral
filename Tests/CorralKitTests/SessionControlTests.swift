@@ -908,6 +908,18 @@ import Testing
         #expect(f.manager.control.reports[child] == nil)
     }
 
+    @Test func debugAnswersOnlyWithDiagnosticsOn() throws {
+        let (f, _, child) = try setup()
+        defer { f.cleanup() }
+        #expect(!f.manager.workspace.settings.diagnostics)
+        #expect(ask(f, ["cmd": "debug", "id": child.uuidString])["error"] as? String == SessionManager.diagnosticsOff)
+        f.manager.setDiagnostics(true)
+        #expect(f.manager.diagnostics)
+        let answer = ask(f, ["cmd": "debug", "id": child.uuidString])
+        #expect(answer["ok"] as? Bool == true)
+        #expect(answer["render"] is [String: Any])
+    }
+
     @Test func statsMeasureSessionsOnlyWhenTurnedOn() async throws {
         let (f, boss, child) = try setup()
         defer { f.cleanup() }

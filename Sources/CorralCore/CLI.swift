@@ -5,7 +5,7 @@ import Foundation
 public enum CorralCLI {
     public static let commands: Set<String> = [
         "spawn", "list", "status", "wait", "approve", "deny", "send", "output", "close", "report", "stats", "folder", "events",
-        "skill", "help",
+        "debug", "skill", "help",
     ]
     /// Exit status of `wait` and `spawn --wait`, by what the session did, so a script can branch on it.
     public static func exitStatus(state: String?, failed: Bool) -> Int32 {
@@ -71,6 +71,7 @@ public enum CorralCLI {
                                            sidebar folders; PATH is names from the top, like Monitoring/Disk
                                            (move makes missing folders, / is the top level; delete keeps the sessions)
       corral skill install [claude|opencode|FOLDER]
+      corral debug [ID]                    how a terminal is drawn right now (the shown session without ID)
 
     IDs may be shortened to a unique prefix. --json prints the app's answer as JSON.
     Without IDs, wait watches the sessions started from the session it runs in.
@@ -182,6 +183,9 @@ public enum CorralCLI {
             if !positional.isEmpty { request["ids"] = positional }
             if flags.contains("mine") { request["mine"] = true }
             call.follows = true
+        case "debug":
+            guard positional.count <= 1 else { throw UsageError("corral debug [ID]") }
+            if let id = positional.first { request["id"] = id }
         case "stats":
             guard positional.count <= 1 else { throw UsageError("corral stats [ID]") }
             if let id = positional.first { request["id"] = id }
@@ -265,6 +269,9 @@ public enum CorralCLI {
             out.append("report\(report["failed"] as? Bool == true ? " (failed)" : ""): \(text)")
         }
         if let screen = answer["screen"] as? String { out.append("screen:\n\(screen)") }
+        if let r = answer["render"] as? [String: Any] {
+            out += r.keys.sorted().map { "\($0): \(r[$0].map { "\($0)" } ?? "")" }
+        }
         if let result = answer["result"] as? String { out.append("result:\n\(result)") }
         for row in answer["stats"] as? [[String: Any]] ?? [] {
             if let s = row["session"] as? [String: Any] { out.append(line(s)) }

@@ -40,6 +40,8 @@ public protocol TerminalSurface: AnyObject {
     func viewportText() -> String
     @discardableResult func perform(binding: String) -> Bool
     func setVisible(_ visible: Bool)
+    /// How the terminal is drawn right now (`corral debug`): view, layer and frame state.
+    func renderReport() -> [String: Any]
     /// Ends the terminal (kills its processes). Idempotent.
     func destroy()
 }
@@ -58,6 +60,7 @@ public protocol TerminalFactory: AnyObject {
 
 public extension TerminalSurface {
     func viewportText() -> String { screenText() }
+    func renderReport() -> [String: Any] { [:] }
 }
 
 public extension TerminalFactory {
@@ -251,4 +254,10 @@ public protocol TerminalActionHandler: AnyObject {
     /// Returns whether the host handled the action (false lets the terminal fall back).
     func perform(_ action: TerminalAction, terminal: TerminalSurface?) -> Bool
     func closeRequested(_ terminal: TerminalSurface, processAlive: Bool)
+    /// Settings › General › Diagnostics: terminals log their repairs.
+    var diagnostics: Bool { get }
+}
+
+public extension TerminalActionHandler {
+    var diagnostics: Bool { false }
 }

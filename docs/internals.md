@@ -41,7 +41,8 @@ Where status comes from:
    shell-integration command-finished, the terminal's foreground process (detects `claude`,
    `opencode`, `pi` starting/exiting), and the direct-launch script's agent exit report.
 3. **Claude background jobs** (`claude --bg`): listed under *Background agents* from
-   `claude agents --json`, refreshed on FSEvents in `~/.claude/jobs` (no polling). Attach opens
+   `claude agents --json`, refreshed on FSEvents in `~/.claude/jobs` (no polling): changes inside a
+   known job's folder re-read only its `state.json`; only new or removed jobs run the CLI. Attach opens
    `claude attach <id>` in a session.
 
 ## Terminal
@@ -232,7 +233,9 @@ SQLite FTS5 index (`~/Library/Application Support/Corral/index.sqlite`) over:
 Claude transcripts (`~/.claude/projects/*/*.jsonl`: prompts, answers, Bash commands; no tool
 output, no thinking), OpenCode (`~/.local/share/opencode/opencode.db`, read-only), PI
 (`~/.pi/agent/sessions`), and the final scrollback of closed shell sessions. Incremental
-(byte offsets / watermark), triggered by FSEvents. Enter on a result focuses the open session,
+(byte offsets / watermark), triggered by FSEvents: only the Claude transcripts FSEvents named
+(a folder-level event walks all), and per OpenCode session only parts from the last indexed one on
+(it may still have been streaming). Enter on a result focuses the open session,
 reopens a closed one, or resumes the transcript in a new session.
 
 Each result shows how many messages matched and its two best distinct passages, cleaned up to

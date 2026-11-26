@@ -116,6 +116,53 @@ struct BackgroundCommandTests {
         #expect(ProcessInspector.claudeBackgroundShells(agent: 0).isEmpty)
     }
 
+    /// A working job writes its timeline next to its state: only state.json is re-read, no `claude agents`.
+    @Test func jobFileChangesRereadOnlyThatJobsState() async throws {
+        let f = fixture(Fake())
+        defer { f.cleanup() }
+        let jobs = f.manager.env.jobsDir
+        let dir = jobs.appendingPathComponent("j1")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let other = BackgroundAgent(id: "j2", sessionId: "s2", name: "Other", cwd: "/", state: "working")
+        f.manager.applyBackground([BackgroundAgent(id: "j1", sessionId: "s", name: "Job", cwd: "/", state: "working"), other])
+        var emits = 0
+        f.manager.observe { if case .background = $0 { emits += 1 } }
+        let state: [String: Any] = ["state": "working", "tempo": "idle", "name": "Renamed", "inFlight": ["tasks": 1]]
+        try JSONSerialization.data(withJSONObject: state).write(to: dir.appendingPathComponent("state.json"))
+        let paths = ["timeline.jsonl", "state.json", "tmp/x"].map { dir.appendingPathComponent($0).path }
+        f.manager.backgroundChanged(paths)
+        #expect(f.manager.background.first?.name == "Renamed" && f.manager.background.first?.inFlight == 1)
+        #expect(f.manager.background.last == other && emits == 1)
+        // Unchanged state: nothing re-applied.
+        f.manager.backgroundChanged(paths)
+        #expect(emits == 1)
+        // A new job folder needs the full list (no claude binary here: an empty one).
+        f.manager.backgroundChanged([jobs.appendingPathComponent("j3").path])
+        await waitUntil { f.manager.background.isEmpty }
+        #expect(f.manager.background.isEmpty)
+    }
+
+    /// The job file can say "a script still runs" before the turn's Stop arrives; a later batch with
+    /// only the timeline (state unchanged) still puts the attached session on hold.
+    @Test func anAttachedJobIsHeldEvenWhenItsStateWroteFirst() throws {
+        let f = fixture(Fake())
+        defer { f.cleanup() }
+        let dir = f.manager.env.jobsDir.appendingPathComponent("job1")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let job = BackgroundAgent(id: "job1", sessionId: "s-job1", name: "Job", cwd: f.dir.path, state: "working")
+        f.manager.applyBackground([job])
+        f.manager.attach(job)
+        let id = try #require(f.selected)
+        hook(f, id, "UserPromptSubmit")
+        let state: [String: Any] = ["state": "working", "tempo": "idle", "inFlight": ["tasks": 1]]
+        try JSONSerialization.data(withJSONObject: state).write(to: dir.appendingPathComponent("state.json"))
+        f.manager.backgroundChanged([dir.appendingPathComponent("state.json").path])
+        hook(f, id, "Stop")
+        #expect(f.manager.live[id]?.status.activity == .done)
+        f.manager.backgroundChanged([dir.appendingPathComponent("timeline.jsonl").path])
+        #expect(f.manager.live[id]?.status.activity == .working && f.manager.live[id]?.status.detail == StatusReducer.backgroundDetail)
+    }
+
     @Test func aBackgroundJobsScriptsKeepItWorkingAfterItsTurn() throws {
         let f = fixture(Fake())
         defer { f.cleanup() }

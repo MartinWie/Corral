@@ -28,6 +28,14 @@ import Testing
         #expect(try request(["spawn", "--json"]).json)
     }
 
+    @Test func debugReportsHowATerminalIsDrawn() throws {
+        #expect(try request(["debug"]).request["id"] == nil)
+        #expect(try request(["debug", "1f"]).request["id"] as? String == "1f")
+        #expect(throws: CorralCLI.UsageError.self) { try request(["debug", "a", "b"]) }
+        let text = CorralCLI.render(["ok": true, "render": ["problems": "no frame", "draws_since_shown": 0]])
+        #expect(text == "draws_since_shown: 0\nproblems: no frame")
+    }
+
     @Test func promptsComeFromFilesAndStdin() throws {
         #expect(try request(["spawn", "--prompt-file", "task.md"], files: ["/work/task.md": "from a file\n"])
             .request["prompt"] as? String == "from a file")

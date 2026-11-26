@@ -6,20 +6,43 @@ enum TranscriptIndexer {
 
     // MARK: Claude Code (~/.claude/projects/<project>/<session>.jsonl)
 
-    static func indexClaude(db: SQLiteDB, root: URL, chunkSize: Int = 4 << 20) throws {
+    /// `changed`: paths FSEvents reported. Transcripts among them are read alone; anything that
+    /// may hide others (the root or a project folder itself) walks every project.
+    static func indexClaude(db: SQLiteDB, root: URL, changed: [String]? = nil, chunkSize: Int = 4 << 20) throws {
         let fm = FileManager.default
-        guard let projects = try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil) else { return }
-        for project in projects {
-            guard let files = try? fm.contentsOfDirectory(at: project, includingPropertiesForKeys: nil) else { continue }
-            for file in files where file.pathExtension == "jsonl" {
-                let sid = file.deletingPathExtension().lastPathComponent
-                try autoreleasepool {
-                    try indexJSONL(db: db, file: file, key: "claude:\(sid)", chunkSize: chunkSize) { lines, state in
-                        try parseClaude(db: db, lines: lines, key: "claude:\(sid)", sessionId: sid, state: &state)
-                    }
+        let files: [URL]
+        if let changed, !changed.isEmpty, let only = claudeTranscripts(in: changed, root: root) {
+            files = only
+        } else {
+            guard let projects = try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil) else { return }
+            files = projects.flatMap { (try? fm.contentsOfDirectory(at: $0, includingPropertiesForKeys: nil)) ?? [] }
+        }
+        for file in files where file.pathExtension == "jsonl" {
+            let sid = file.deletingPathExtension().lastPathComponent
+            try autoreleasepool {
+                try indexJSONL(db: db, file: file, key: "claude:\(sid)", chunkSize: chunkSize) { lines, state in
+                    try parseClaude(db: db, lines: lines, key: "claude:\(sid)", sessionId: sid, state: &state)
                 }
             }
         }
+    }
+
+    /// Transcripts (`<project>/<session>.jsonl`) among `paths`, deeper files dropped; nil when a
+    /// path is the root or a project folder (a batch FSEvents coalesced), which needs a full walk.
+    static func claudeTranscripts(in paths: [String], root: URL) -> [URL]? {
+        let base = root.resolvingSymlinksInPath().path + "/"
+        var files: Set<URL> = []
+        for raw in paths {
+            let url = URL(fileURLWithPath: raw).resolvingSymlinksInPath()
+            guard url.path.hasPrefix(base) else { return nil }
+            let parts = url.path.dropFirst(base.count).split(separator: "/")
+            if parts.count < 2 { return nil }
+            // Under `root` as given: the index keys a transcript's read offset by this path.
+            if parts.count == 2, url.pathExtension == "jsonl" {
+                files.insert(root.appendingPathComponent(String(parts[0])).appendingPathComponent(String(parts[1])))
+            }
+        }
+        return files.sorted { $0.path < $1.path }
     }
 
     struct ParseState {
@@ -283,20 +306,51 @@ enum TranscriptIndexer {
         let parts = try oc.prepare("""
         SELECT json_extract(p.data, '$.text'), json_extract(m.data, '$.role'), p.time_created
         FROM part p JOIN message m ON m.id = p.message_id
-        WHERE p.session_id = ? AND json_extract(p.data, '$.type') = 'text'
+        WHERE p.session_id = ? AND p.time_created >= ? AND json_extract(p.data, '$.type') = 'text'
           AND COALESCE(json_extract(p.data, '$.synthetic'), 0) = 0
         ORDER BY p.time_created
         """)
+        /// Seconds of the newest indexed part (Corral's own title and rename docs aside).
+        func lastPartTime(db: SQLiteDB, key: String) throws -> Double? {
+            var t: Double?
+            try db.cached("SELECT MAX(ts) FROM doc_map WHERE session_key = ? AND role NOT IN ('title', 'name')").bind(key).rows {
+                t = $0.isNull(0) ? nil : $0.double(0)
+            }
+            return t
+        }
+        // Every part, not only text ones: no JSON read, the session index covers it.
+        let before = try oc.prepare("SELECT COUNT(*) FROM part WHERE session_id = ? AND time_created < ?")
+        func countBefore(_ session: String, _ t: Double) throws -> Int64 {
+            var n: Int64 = 0
+            try before.bind(session, Int64((t * 1000).rounded())).rows { n = $0.int(0) }
+            return n
+        }
         // Batches keep each write transaction short so searches stay responsive during the first run.
         for batch in stride(from: 0, to: sessions.count, by: 50).map({ Array(sessions[$0..<min($0 + 50, sessions.count)]) }) {
             try db.transaction {
                 for s in batch { try autoreleasepool {
-                    let key = "opencode:\(s.id)"
-                    try SearchIndex.deleteDocs(db: db, key: key)
+                    let key = "opencode:\(s.id)", mark = "opencode.parts:\(s.id)"
+                    // An active session changes every few seconds: parts before the last one indexed are
+                    // final, so only that one (it may have been streaming) and newer ones are read again.
+                    // Unless parts before it went away (an undo): then the whole session is.
+                    var since = try lastPartTime(db: db, key: key)
+                    if let t = since {
+                        var marked: String?
+                        try db.cached("SELECT v FROM meta WHERE k = ?").bind(mark).rows { marked = $0.string(0) }
+                        if marked != String(try countBefore(s.id, t)) { since = nil }
+                    }
+                    if let since {
+                        // Corral's own rename ('name') stays.
+                        let match = "session_key = ? AND (role = 'title' OR (role != 'name' AND ts >= ?))"
+                        try db.cached("DELETE FROM docs WHERE rowid IN (SELECT id FROM doc_map WHERE \(match))").bind(key, since).run()
+                        try db.cached("DELETE FROM doc_map WHERE \(match)").bind(key, since).run()
+                    } else {
+                        try SearchIndex.deleteDocs(db: db, key: key)
+                    }
                     var firstPrompt: String?
                     let title = s.title.hasPrefix("New session - ") ? nil : s.title
                     if let title { try SearchIndex.insertDoc(db: db, key: key, role: "title", ts: Double(s.updated) / 1000, text: title) }
-                    try parts.bind(s.id).rows { row in
+                    try parts.bind(s.id, since.map { Int64(($0 * 1000).rounded()) } ?? 0).rows { row in
                         guard let text = row.string(0) else { return }
                         let role = row.string(1) ?? "assistant"
                         if role == "user", firstPrompt == nil { firstPrompt = firstLine(text) }
@@ -305,6 +359,10 @@ enum TranscriptIndexer {
                     try SearchIndex.upsertSession(db: db, key: key, agent: .opencode, sessionId: s.id, cwd: s.dir,
                                                   custom: nil, ai: title, firstPrompt: firstPrompt,
                                                   created: Double(s.created) / 1000, updated: Double(s.updated) / 1000)
+                    if let t = try lastPartTime(db: db, key: key) {
+                        try db.cached("INSERT INTO meta(k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v")
+                            .bind(mark, String(try countBefore(s.id, t))).run()
+                    }
                 } }
                 try db.cached("INSERT INTO meta(k, v) VALUES ('opencode.watermark', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v")
                     .bind(String(batch.last!.updated)).run()
@@ -340,6 +398,7 @@ enum TranscriptIndexer {
 
 /// The end of a Claude transcript, for `corral` when the Stop hook carried no closing message.
 public enum TranscriptTail {
+    private static let assistantMarker = Data("\"type\":\"assistant\"".utf8)
     /// The last assistant text of the main conversation within the file's last `window` bytes.
     public static func lastAssistantText(path: String, window: Int = 512 * 1024) -> String? {
         guard let handle = FileHandle(forReadingAtPath: path) else { return nil }
@@ -348,7 +407,9 @@ public enum TranscriptTail {
         try? handle.seek(toOffset: size > UInt64(window) ? size - UInt64(window) : 0)
         guard let data = try? handle.readToEnd() else { return nil }
         for line in data.split(separator: 0x0A).reversed() {
-            guard let obj = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any],
+            // Byte check first: the tail is mostly large tool results, not worth parsing.
+            guard line.range(of: assistantMarker) != nil,
+                  let obj = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any],
                   obj["type"] as? String == "assistant", obj["isSidechain"] as? Bool != true,
                   let content = (obj["message"] as? [String: Any])?["content"] as? [[String: Any]] else { continue }
             let text = content.compactMap { $0["type"] as? String == "text" ? $0["text"] as? String : nil }

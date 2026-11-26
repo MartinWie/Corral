@@ -60,7 +60,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     let topFade = EdgeFadeView(top: true)
     let bottomFade = EdgeFadeView(top: false)
 
-    private var nodes: [Kind: SidebarNode] = [:]
+    private(set) var nodes: [Kind: SidebarNode] = [:]
     private(set) var roots: [SidebarNode] = []
     private var shown: Snapshot = [:]
     private var parentOf: [Kind: SidebarNode] = [:]
@@ -90,7 +90,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     private var bannerWanted: Bool?
     private var bannerGeneration = 0
     private(set) var chipTargets: (above: Int?, below: Int?) = (nil, nil)
-    private var backgroundIds: [String: UUID] = [:]
+    private(set) var backgroundIds: [String: UUID] = [:]
     /// From the main menu, refreshed when shortcuts change (not per configure).
     private lazy var closeTip = Self.closeTooltip()
 
@@ -334,6 +334,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             applied = apply(ops, old: old, new: shown)
         }
         if !applied { fullReload() }
+        if old != shown { pruneCaches() }
         syncingSelection = false
         loaded = true
         if old != shown { scheduleSettleCheck() }
@@ -351,6 +352,15 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         }
         if !commandHints.isEmpty { setCommandHeld(true) }
         refreshChrome(animated: true)
+    }
+
+    /// Nodes and job icon ids of rows gone for good (closed out of the list, forgotten, jobs ended).
+    private func pruneCaches() {
+        var kept = Set(shown.values.joined())
+        kept.formUnion(shown.keys.compactMap { $0 })
+        if nodes.count > kept.count { nodes = nodes.filter { kept.contains($0.key) } }
+        let jobs = Set(manager.background.map(\.id))
+        if backgroundIds.count > jobs.count { backgroundIds = backgroundIds.filter { jobs.contains($0.key) } }
     }
 
     private func fullReload() {
@@ -505,8 +515,10 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         guard loaded, !(rows && views) else { return }
         // Never under the user's hands: a drag shifts and hides rows on purpose.
         if NSEvent.pressedMouseButtons != 0 { return scheduleSettleCheck() }
-        NSLog("Corral sidebar: out of step with the model (rows match: %@, row views and heights: %@), reloading",
-              rows ? "yes" : "no", views ? "yes" : "no")
+        if manager.diagnostics {
+            NSLog("Corral sidebar: out of step with the model (rows match: %@, row views and heights: %@), reloading",
+                  rows ? "yes" : "no", views ? "yes" : "no")
+        }
         heals += 1
         reload(forceFull: true)
     }

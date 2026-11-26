@@ -138,15 +138,18 @@ public final class SearchIndex {
     public enum Source: Sendable { case claude, opencode, pi }
 
     /// Incrementally indexes the given sources (all by default).
+    /// `claudeChanged`: paths FSEvents reported under the Claude root (nil: walk every transcript).
     public func refresh(_ sources: Set<Source> = [.claude, .opencode, .pi], roots: Roots = .standard,
-                        completion: (() -> Void)? = nil) {
+                        claudeChanged: [String]? = nil, completion: (() -> Void)? = nil) {
         queue.async { [weak self] in
             guard let self, let db = self.db else {
                 DispatchQueue.main.async { completion?() }
                 return
             }
             do {
-                if sources.contains(.claude) { try TranscriptIndexer.indexClaude(db: db, root: roots.claudeProjects, chunkSize: self.chunkSize) }
+                if sources.contains(.claude) { try TranscriptIndexer.indexClaude(db: db, root: roots.claudeProjects,
+                                                                                    changed: self.lastError == nil ? claudeChanged : nil,
+                                                                                    chunkSize: self.chunkSize) }
                 if sources.contains(.opencode) { try TranscriptIndexer.indexOpenCode(db: db, dbURL: roots.opencodeDB) }
                 if sources.contains(.pi) { try TranscriptIndexer.indexPi(db: db, root: roots.piSessions, chunkSize: self.chunkSize) }
                 self.lastError = nil

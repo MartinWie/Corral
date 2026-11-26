@@ -376,6 +376,15 @@ final class SessionManager: TerminalActionHandler {
         emit(.integrations)
     }
 
+    func setDiagnostics(_ on: Bool) {
+        guard workspace.settings.diagnostics != on else { return }
+        workspace.settings.diagnostics = on
+        scheduleSave()
+        emit(.settings)
+    }
+
+    public var diagnostics: Bool { workspace.settings.diagnostics }
+
     func setModels(_ models: AgentModels, for agent: AgentKind) {
         guard workspace.settings.models(for: agent) != models else { return }
         workspace.settings.models[agent.rawValue] = models
@@ -498,7 +507,7 @@ final class SessionManager: TerminalActionHandler {
         let roots = env.roots
         let ocDir = roots.opencodeDB.deletingLastPathComponent().path
         let wanted: [(String, ([String]) -> Void)] = [
-            (roots.claudeProjects.path, { [weak self] _ in self?.refreshIndex([.claude]) }),
+            (roots.claudeProjects.path, { [weak self] paths in self?.refreshIndex([.claude], claudeChanged: paths) }),
             (ocDir, { [weak self] paths in
                 if paths.contains(where: { $0.contains("opencode.db") }) { self?.refreshIndex([.opencode]) }
             }),
@@ -509,6 +518,7 @@ final class SessionManager: TerminalActionHandler {
         for (path, handler) in wanted where watchers[path] == nil {
             guard FileManager.default.fileExists(atPath: path) else { continue }
             watchers[path] = FSWatcher(paths: [path], latency: 2, handler: handler)
+            if path == roots.claudeProjects.path { added.insert(.claude) }
             if path == ocDir { added.insert(.opencode) }
             if path == roots.piSessions.path { added.insert(.pi) }
         }
@@ -517,8 +527,8 @@ final class SessionManager: TerminalActionHandler {
 
     var watchedPaths: Set<String> { Set(watchers.keys) }
 
-    func refreshIndex(_ sources: Set<SearchIndex.Source>) {
-        index.refresh(sources, roots: env.roots)
+    func refreshIndex(_ sources: Set<SearchIndex.Source>, claudeChanged: [String]? = nil) {
+        index.refresh(sources, roots: env.roots, claudeChanged: claudeChanged)
     }
 
     func prepareForTermination() {
@@ -1316,19 +1326,24 @@ final class SessionManager: TerminalActionHandler {
 
     // MARK: Background agents
 
-    /// Job state changes only touch state.json of known jobs: re-read those files directly.
-    /// New or removed jobs need names from `claude agents`, so they trigger a full load.
+    /// Changes inside known jobs' folders (state.json, timeline.jsonl, tmp files) re-read only their
+    /// state.json. New or removed jobs need `claude agents` (a Node process), so they trigger a full load.
     func backgroundChanged(_ paths: [String]) {
         let jobs = env.jobsDir.resolvingSymlinksInPath().path
+        guard !paths.isEmpty else { return reloadBackground() }
         let known = Set(background.map(\.id))
-        let onlyStates = paths.allSatisfy { raw in
+        var touched: Set<String> = []
+        for raw in paths {
             let p = URL(fileURLWithPath: raw).resolvingSymlinksInPath().path
-            guard p.hasPrefix(jobs + "/"), p.hasSuffix("/state.json") else { return false }
-            let id = p.dropFirst(jobs.count + 1).split(separator: "/").first.map(String.init) ?? ""
-            return known.contains(id)
+            let parts = p.hasPrefix(jobs + "/") ? p.dropFirst(jobs.count + 1).split(separator: "/") : []
+            guard parts.count > 1, known.contains(String(parts[0])) else { return reloadBackground() }
+            touched.insert(String(parts[0]))
         }
-        guard onlyStates, !paths.isEmpty else { reloadBackground(); return }
-        applyBackground(background.map { BackgroundAgents.refreshState($0, jobsDir: env.jobsDir) })
+        let refreshed = background.map { touched.contains($0.id) ? BackgroundAgents.refreshState($0, jobsDir: env.jobsDir) : $0 }
+        if refreshed != background { return applyBackground(refreshed) }
+        // Unchanged, but an attached job's turn may have ended since its state last changed.
+        let attached = Set(live.keys.compactMap { workspace.sessions[$0]?.bgJobId })
+        if !touched.isDisjoint(with: attached) { applyJobStatuses() }
     }
 
     private var backgroundCompletions: [() -> Void] = []
@@ -1368,6 +1383,14 @@ final class SessionManager: TerminalActionHandler {
             renamed = true
         }
         if renamed { scheduleSave() }
+        applyJobStatuses()
+        updateBadge()
+        emit(.background)
+    }
+
+    /// Sessions attached to a background job take its state.
+    private func applyJobStatuses() {
+        let agents = background
         for (id, ls) in live {
             guard let job = workspace.sessions[id]?.bgJobId, let agent = agents.first(where: { $0.id == job }) else { continue }
             // A background job's scripts run in Claude's daemon, not under this terminal, so
@@ -1378,8 +1401,6 @@ final class SessionManager: TerminalActionHandler {
                 apply(.backgroundJob(agent.activity, detail: agent.needs), to: id)
             }
         }
-        updateBadge()
-        emit(.background)
     }
 
     /// Background agents not already shown as an attached session.

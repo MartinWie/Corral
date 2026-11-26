@@ -26,6 +26,22 @@ struct SidebarTests {
         return (f, s, w)
     }
 
+    /// Rows that leave for good drop their nodes and job icon ids: long uptimes with many spawned
+    /// sessions don't grow the caches.
+    @Test func goneRowsLeaveNoCachedNodes() {
+        let (f, s, w) = makeWindowed()
+        defer { f.cleanup(); w.close() }
+        for _ in 0..<30 {
+            f.manager.newSession(agent: .shell, cwd: f.dir.path)
+            f.manager.close(f.selected!)
+        }
+        f.manager.applyBackground([BackgroundAgent(id: "j1", sessionId: "s", name: "Job", cwd: "/", state: "working")])
+        settle(w)
+        #expect(s.backgroundIds.keys.sorted() == ["j1"])
+        f.manager.applyBackground([])
+        #expect(s.nodes.count <= 2 && s.backgroundIds.isEmpty)
+    }
+
     func settle(_ w: NSWindow) {
         w.contentView?.layoutSubtreeIfNeeded()
         w.displayIfNeeded()

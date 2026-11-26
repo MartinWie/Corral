@@ -150,13 +150,19 @@ struct SettingsPagesTests {
         let f = Fixture { $0.trackerBinary = nil }
         defer { f.cleanup() }
         let w = SettingsWindowController(manager: f.manager)
-        #expect(w.pages[.general]?.lists.count == 2)
+        #expect(w.pages[.general]?.lists.count == 3)
+        #expect(w.diagnosticsSwitch.state == .off)
+        w.diagnosticsSwitch.state = .on
+        w.diagnosticsChanged(w.diagnosticsSwitch)
+        #expect(f.manager.workspace.settings.diagnostics)
+        f.manager.setDiagnostics(false)
+        #expect(w.diagnosticsSwitch.state == .off)
         w.rebuildIndex(nil)
         #expect(w.rebuildButton.title == "Rebuilding…" && !w.rebuildButton.isEnabled)
         let g = Fixture { $0.trackerBinary = "/usr/bin/true" }
         defer { g.cleanup() }
         let t = SettingsWindowController(manager: g.manager)
-        #expect(t.pages[.general]?.lists.count == 3)
+        #expect(t.pages[.general]?.lists.count == 4)
         #expect(t.importButton.action == #selector(AppDelegate.importFromTracker(_:)) && t.importButton.target == nil)
     }
 
@@ -228,7 +234,8 @@ struct SettingsPagesTests {
             let row = try #require(list.rows.first as? SettingsRow)
             #expect(row.titleLabel.textColor == r.primary && row.captionLabel.textColor == r.secondary)
             let general = try #require(w.pages[.general])
-            #expect(general.sectionLabels.map(\.1) == ["Power", "Search"] || general.sectionLabels.map(\.1) == ["Power", "Search", "Sessions"])
+            #expect(general.sectionLabels.map(\.1) == ["Power", "Search", "Troubleshooting"]
+                || general.sectionLabels.map(\.1) == ["Power", "Search", "Sessions", "Troubleshooting"])
         }
         NotificationCenter.default.post(name: .corralThemeDidChange, object: nil)
         // "system" follows macOS: no forced appearance on the window.

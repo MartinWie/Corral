@@ -437,6 +437,8 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public var tidyMinutes = 0
     /// For sessions started through `corral`: notify only when one fails or has waited on the user for `quietWait`.
     public var quietSpawned = false
+    /// Repairs of terminals and the sidebar go to Console, and `corral debug` answers.
+    public var diagnostics = false
 
     public static let defaultSpawnNote = "When you are finished, run `~/.local/bin/corral report \"<result in one line>\"` "
         + "(add --fail if you could not do it), then end with a short summary of what you did."
@@ -446,7 +448,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
         self.notifications = notifications
     }
 
-    enum CodingKeys: String, CodingKey { case keepAwake, keepDisplayOn, notifications, hooksRemoved, control, controlAll, models, spawnNote, spawnNoteOn, measure, tidyMinutes, quietSpawned }
+    enum CodingKeys: String, CodingKey { case keepAwake, keepDisplayOn, notifications, hooksRemoved, control, controlAll, models, spawnNote, spawnNoteOn, measure, tidyMinutes, quietSpawned, diagnostics }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -462,6 +464,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
         measure = (try? c.decodeIfPresent(Bool.self, forKey: .measure)) ?? false
         tidyMinutes = (try? c.decodeIfPresent(Int.self, forKey: .tidyMinutes)) ?? 0
         quietSpawned = (try? c.decodeIfPresent(Bool.self, forKey: .quietSpawned)) ?? false
+        diagnostics = (try? c.decodeIfPresent(Bool.self, forKey: .diagnostics)) ?? false
     }
 
     public func models(for agent: AgentKind) -> AgentModels {

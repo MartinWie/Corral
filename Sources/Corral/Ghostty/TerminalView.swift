@@ -1,5 +1,6 @@
 import AppKit
 import Carbon
+import IOSurface
 import CorralKit
 import GhosttyKit
 
@@ -171,15 +172,39 @@ final class TerminalView: NSView, NSTextInputClient, TerminalSurface {
     func setVisible(_ visible: Bool) {
         guard let surface else { return }
         shown = visible
+        showGen &+= 1
         // A hidden surface gives up its frame and draws again only through the display link: bind
         // it to the current display first (its id can change while hidden, e.g. after a lock).
         if visible { updateDisplayID() }
         ghostty_surface_set_occlusion(surface, visible)
-        if visible { scheduleShowDraws() }
+        if visible {
+            shownAt = Date()
+            draws = 0
+            skipped = nil
+            healed = false
+            // A dropped frame is replaced before this pass is shown, never an empty pane in between.
+            if layer?.contents == nil { drawIfShown() }
+            scheduleShowDraws()
+        } else {
+            scheduleFrameDrop()
+        }
     }
 
     /// Whether the container shows this terminal (`setVisible`).
     private var shown = false
+    /// Bumped by every show, hide and app activation: pending draws, checks and drops of an older one bail.
+    private var showGen = 0
+    /// A terminal switched away from keeps its last frame (one full-size IOSurface) this long, so
+    /// flipping between sessions stays instant; then it lets go of it.
+    static let frameDropDelay: TimeInterval = 5
+    private var shownAt: Date?
+    /// Synchronous draws since it was last shown, and why the last one was skipped.
+    private var draws = 0
+    private var skipped: String?
+    private var lastDraw: Date?
+    private var healed = false
+    /// After the last show draw (3 s): what the screen shows is checked once.
+    static let healCheck: TimeInterval = 3.5
 
     /// Becoming visible makes the render thread draw, but that frame can be lost: it waits for a vsync
     /// tick, or is dropped for not matching the layer's size once layout has moved on, and after a
@@ -189,24 +214,142 @@ final class TerminalView: NSView, NSTextInputClient, TerminalSurface {
     /// again once the render thread caught up with output from while hidden, and twice more for a
     /// screen that is still coming back; each also asks Core Animation to draw the layer (Ghostty's
     /// IOSurfaceLayer draws in `display`).
-    private func scheduleShowDraws() {
+    private func scheduleShowDraws(check: Bool = true) {
+        let gen = showGen
         for delay in [0.0, 0.25, 1, 3] {
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-                MainActor.assumeIsolated { self?.drawIfShown() }
+                MainActor.assumeIsolated {
+                    guard let self, self.showGen == gen else { return }
+                    self.drawIfShown()
+                }
+            }
+        }
+        guard check else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.healCheck) { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, self.showGen == gen else { return }
+                self.healIfBlank()
             }
         }
     }
 
-    private func drawIfShown() {
-        guard shown, let surface, window != nil, !isHiddenOrHasHiddenAncestor,
-              bounds.width > 0, bounds.height > 0 else { return }
+    @discardableResult
+    private func drawIfShown() -> Bool {
+        guard shown, let surface else { return false }
+        if let reason = window == nil ? "no window" : isHiddenOrHasHiddenAncestor ? "hidden view"
+            : bounds.width <= 0 || bounds.height <= 0 ? "zero size" : nil {
+            skipped = reason
+            return false
+        }
         ghostty_surface_draw(surface)
         layer?.setNeedsDisplay()
+        draws += 1
+        lastDraw = Date()
+        return true
+    }
+
+    /// Only for a terminal the container hid (switched away): a covered window keeps the shown one's
+    /// frame, so coming back to Corral shows it at once.
+    private func scheduleFrameDrop() {
+        let gen = showGen
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.frameDropDelay) { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, self.showGen == gen, !self.shown, self.isHiddenOrHasHiddenAncestor,
+                      let layer = self.layer, layer.contents != nil else { return }
+                CATransaction.begin()
+                CATransaction.setDisableActions(true)
+                layer.contents = nil
+                CATransaction.commit()
+            }
+        }
+    }
+
+    // MARK: Render check
+
+    /// What keeps a shown terminal from showing its frame, empty when nothing does.
+    func renderProblems() -> [String] {
+        guard shown, window != nil else { return [] }
+        var problems: [String] = []
+        if isHiddenOrHasHiddenAncestor { problems.append("view hidden") }
+        guard let layer else { return problems + ["no layer"] }
+        if String(describing: type(of: layer)) != "IOSurfaceLayer" { problems.append("layer \(type(of: layer))") }
+        if layer.isHidden { problems.append("layer hidden") }
+        if layer.opacity < 0.99 || (layer.presentation()?.opacity ?? 1) < 0.99 { problems.append("faded") }
+        if let frame = layer.contents.flatMap({ $0 as? IOSurface }) {
+            let w = Int((layer.bounds.width * layer.contentsScale).rounded()), h = Int((layer.bounds.height * layer.contentsScale).rounded())
+            if abs(frame.width - w) > 1 || abs(frame.height - h) > 1 { problems.append("frame \(frame.width)x\(frame.height) for \(w)x\(h)") }
+            if Self.isUniform(frame), viewportText().contains(where: { !$0.isWhitespace }) { problems.append("blank frame") }
+        } else {
+            problems.append(layer.contents == nil ? "no frame" : "frame not an IOSurface")
+        }
+        if draws == 0 { problems.append("not drawn" + (skipped.map { " (\($0))" } ?? "")) }
+        return problems
+    }
+
+    /// Every second pixel of the frame (32BGRA, as Ghostty's targets) has one color: nothing drawn on it.
+    static func isUniform(_ frame: IOSurface) -> Bool {
+        guard frame.lock(options: .readOnly, seed: nil) == kIOReturnSuccess else { return false }
+        defer { frame.unlock(options: .readOnly, seed: nil) }
+        guard frame.bytesPerElement == 4, frame.width > 0, frame.height > 0 else { return false }
+        let base = frame.baseAddress.assumingMemoryBound(to: UInt32.self)
+        let stride = frame.bytesPerRow / 4
+        let first = base[0]
+        for y in Swift.stride(from: 0, to: frame.height, by: 2) {
+            let row = base + y * stride
+            for x in Swift.stride(from: 0, to: frame.width, by: 2) where row[x] != first { return false }
+        }
+        return true
+    }
+
+    /// Once per show, after its draws: a terminal that still shows no proper frame starts over
+    /// (hidden, shown, drawn). With diagnostics on, Console says why ("Corral render").
+    private func healIfBlank() {
+        guard shown, !healed, let surface, window?.occlusionState.contains(.visible) == true else { return }
+        let problems = renderProblems()
+        guard !problems.isEmpty else { return }
+        healed = true
+        if runtime?.actionHandler?.diagnostics == true {
+            NSLog("Corral render: %@ blank (%@), redrawing", sessionId.uuidString, problems.joined(separator: ", "))
+        }
+        layer?.removeAllAnimations()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        layer?.opacity = 1
+        layer?.isHidden = false
+        CATransaction.commit()
+        ghostty_surface_set_occlusion(surface, false)
+        ghostty_surface_set_occlusion(surface, true)
+        scheduleShowDraws(check: false)
+    }
+
+    func renderReport() -> [String: Any] {
+        var r: [String: Any] = ["shown": shown, "draws_since_shown": draws, "problems": renderProblems().joined(separator: ", ")]
+        if let shownAt { r["shown_seconds_ago"] = Int(-shownAt.timeIntervalSinceNow) }
+        if let lastDraw { r["last_draw_seconds_ago"] = Int(-lastDraw.timeIntervalSinceNow) }
+        if let skipped { r["last_skip"] = skipped }
+        r["view"] = "\(Int(bounds.width))x\(Int(bounds.height)) hidden=\(isHidden) hidden_ancestor=\(isHiddenOrHasHiddenAncestor)"
+        if let window {
+            r["window"] = "visible=\(window.isVisible) occluded=\(!window.occlusionState.contains(.visible)) key=\(window.isKeyWindow) scale=\(window.backingScaleFactor)"
+        }
+        if let layer {
+            var l = "\(type(of: layer)) \(Int(layer.bounds.width))x\(Int(layer.bounds.height))@\(layer.contentsScale) opacity=\(layer.opacity)"
+            l += " presented_opacity=\(layer.presentation()?.opacity ?? -1) hidden=\(layer.isHidden) animations=\(layer.animationKeys() ?? [])"
+            if let frame = layer.contents.flatMap({ $0 as? IOSurface }) { l += " frame=\(frame.width)x\(frame.height)" } else { l += " frame=none" }
+            r["layer"] = l
+        }
+        if let surface {
+            let size = ghostty_surface_size(surface)
+            r["surface"] = "\(size.columns)x\(size.rows) cells, \(size.width_px)x\(size.height_px) px"
+        }
+        return r
     }
 
     /// Coming back to Corral (after a lock, sleep or another app): the shown terminal draws again.
     @objc private func appDidBecomeActive(_ notification: Notification) {
-        if shown { scheduleShowDraws() }
+        guard shown else { return }
+        showGen &+= 1
+        healed = false
+        scheduleShowDraws()
     }
 
     /// Types text as if pasted (used for drag and drop of paths).

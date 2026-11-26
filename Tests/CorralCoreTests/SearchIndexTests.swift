@@ -80,6 +80,29 @@ struct SearchIndexTests {
         #expect(try search(f, "toolresultword").isEmpty, "tool results skipped")
     }
 
+    /// FSEvents names the transcripts that changed: only those are read; a folder event walks all.
+    @Test func changedTranscriptsAloneAreRead() async throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.dir) }
+        let a = try writeClaude(f, sid: "a", lines: [line(["type": "user", "message": ["content": "alphaword"]])])
+        let b = try writeClaude(f, sid: "b", lines: [line(["type": "user", "message": ["content": "betaword"]])])
+        let root = f.roots.claudeProjects
+        #expect(TranscriptIndexer.claudeTranscripts(in: [a.path, a.path, root.appendingPathComponent("-repo/a/subagents/x.jsonl").path,
+                                                        root.appendingPathComponent("-repo/notes.txt").path], root: root) == [a])
+        #expect(TranscriptIndexer.claudeTranscripts(in: [a.path, root.appendingPathComponent("-repo").path], root: root) == nil)
+        #expect(TranscriptIndexer.claudeTranscripts(in: ["/elsewhere/x.jsonl"], root: root) == nil)
+        // FSEvents reports resolved paths; the walk's keys stay under the root as given.
+        let link = f.dir.appendingPathComponent("link")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: root)
+        #expect(TranscriptIndexer.claudeTranscripts(in: [a.resolvingSymlinksInPath().path], root: link)?.map(\.path)
+                == [link.appendingPathComponent("-repo/a.jsonl").path])
+        await withCheckedContinuation { c in f.index.refresh([.claude], roots: f.roots, claudeChanged: [a.path]) { c.resume() } }
+        #expect(try search(f, "alphaword").count == 1)
+        #expect(try search(f, "betaword").isEmpty)
+        await withCheckedContinuation { c in f.index.refresh([.claude], roots: f.roots, claudeChanged: [b.deletingLastPathComponent().path]) { c.resume() } }
+        #expect(try search(f, "betaword").count == 1)
+    }
+
     @Test func incrementalAppendAndRewrite() async throws {
         let f = try fixture()
         defer { try? FileManager.default.removeItem(at: f.dir) }
@@ -228,6 +251,30 @@ struct SearchIndexTests {
         await refresh(f, [.opencode])
         #expect(try search(f, "interval").count == 1)
         #expect(try search(f, "rebalance")[0].snippets.count == 1)
+
+        // Only the last indexed part and newer ones are read again: a streaming part's grown text
+        // replaces its old one; earlier parts stay once.
+        try oc.exec("""
+        UPDATE part SET data = '{"type":"text","text":"fixed by raising max poll interval and session timeout"}' WHERE id = 'p4';
+        INSERT INTO part VALUES ('p5','m2','ses_1',1004,1004,'{"type":"text","text":"deployed"}');
+        UPDATE session SET time_updated = 4000 WHERE id = 'ses_1';
+        """)
+        await refresh(f, [.opencode])
+        #expect(try search(f, "timeout").count == 1 && search(f, "deployed").count == 1)
+        #expect(try search(f, "interval")[0].snippets.count == 1)
+        #expect(try search(f, "consumer")[0].snippets.count == 1)
+        #expect(try search(f, "kafka")[0].title == "Kafka consumer lag")
+
+        // A rename in Corral doesn't move the cutoff; an undo that deletes earlier parts reads it all again.
+        f.index.setCustomTitle(key: "opencode:ses_1", title: "Lag hunt")
+        try oc.exec("""
+        DELETE FROM part WHERE id = 'p2';
+        INSERT INTO part VALUES ('p6','m2','ses_1',1005,1005,'{"type":"text","text":"rolled forward"}');
+        UPDATE session SET time_updated = 5000 WHERE id = 'ses_1';
+        """)
+        await refresh(f, [.opencode])
+        #expect(try search(f, "rebalance").isEmpty && search(f, "rolled").count == 1)
+        #expect(try search(f, "consumer")[0].snippets.count == 1)
     }
 
     @Test func indexesPiSessions() async throws {
